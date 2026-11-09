@@ -411,16 +411,22 @@ def scan_dm_contacts(verbose: bool = True) -> list:
                 context.close()
                 return []
 
-            items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+            items = page.locator('[data-e2e="dm-new-conversation-item"]')
+            if items.count() == 0:
+                items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
             count = items.count()
 
             for i in range(count):
-                raw_text = items.nth(i).inner_text().strip()
-                lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
-                if lines:
-                    name = lines[0]
-                    if name and name not in detected_contacts:
-                        detected_contacts.append(name)
+                it = items.nth(i)
+                nick_el = it.locator('[data-e2e="dm-new-conversation-nickname"]')
+                if nick_el.count() > 0:
+                    name = nick_el.inner_text().strip()
+                else:
+                    lines = [l.strip() for l in it.inner_text().splitlines() if l.strip()]
+                    name = lines[0] if lines else ""
+
+                if name and name not in detected_contacts:
+                    detected_contacts.append(name)
 
             context.close()
         except Exception as e:
@@ -445,15 +451,23 @@ def scan_dm_contacts(verbose: bool = True) -> list:
 
 def send_message_in_chat(page, message: str) -> bool:
     try:
-        box = page.locator('div[contenteditable="true"]')
+        chatbox = page.locator('[data-e2e="dm-new-chatbox"]')
+        if chatbox.count() > 0:
+            box = chatbox.locator('div[contenteditable="true"]').first
+        else:
+            box = page.locator('div[contenteditable="true"]').first
+
         box.wait_for(state="visible", timeout=8000)
         box.click()
-        box.fill(message)
+        time.sleep(0.5)
+        # Use insert_text for smooth Draft.js emoji & unicode typing
+        page.keyboard.insert_text(message)
         time.sleep(0.5)
         page.keyboard.press("Enter")
         time.sleep(2)
         return True
     except Exception as e:
+        log_message(f"Gagal mengirim pesan di chat: {e}")
         return False
 
 
@@ -505,17 +519,24 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                 msg_to_send = select_all_cfg.get("message", default_msg)
                 exclude_list = [x.lower() for x in select_all_cfg.get("exclude", [])]
 
-                chat_items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+                chat_items = page.locator('[data-e2e="dm-new-conversation-item"]')
+                if chat_items.count() == 0:
+                    chat_items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+
                 total = chat_items.count()
                 if verbose:
                     print(f"[*] Mode SELECT ALL: Memeriksa {total} kontak chat DM...")
 
                 for i in range(total):
                     item = chat_items.nth(i)
-                    name = item.inner_text().split("\n")[0].strip()
+                    nick_el = item.locator('[data-e2e="dm-new-conversation-nickname"]')
+                    if nick_el.count() > 0:
+                        name = nick_el.inner_text().strip()
+                    else:
+                        name = item.inner_text().split("\n")[0].strip()
 
-                    if name.lower() in exclude_list:
-                        if verbose:
+                    if not name or name.lower() in exclude_list:
+                        if verbose and name:
                             print(f"  [-] Melewati {name} (ada di daftar blacklist)")
                         continue
 
@@ -536,7 +557,6 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
             # MODE B: GROUPS / LABELING
             else:
                 groups = cfg.get("groups", {})
-                # build recipient dictionary: { member_name: custom_message }
                 recipients = {}
                 for g_name, g_info in groups.items():
                     if not g_info.get("enabled", True):
@@ -555,8 +575,11 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                     if verbose:
                         print(f"  [>] Mencari kontak '{target_name}'...")
 
-                    # Check visible chats first
-                    target_locator = page.locator(f'div[data-e2e="chat-list-item"]:has-text("{target_name}"), li[class*="chat-item"]:has-text("{target_name}")')
+                    # Search by nickname or text in conversation item
+                    target_locator = page.locator(f'[data-e2e="dm-new-conversation-item"]:has([data-e2e="dm-new-conversation-nickname"]:text-is("{target_name}"))')
+                    if target_locator.count() == 0:
+                        target_locator = page.locator(f'[data-e2e="dm-new-conversation-item"]:has-text("{target_name}"), div[data-e2e="chat-list-item"]:has-text("{target_name}")')
+
                     found = False
                     if target_locator.count() > 0:
                         target_locator.first.click()
@@ -567,7 +590,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                         if search_box.count() > 0:
                             search_box.first.fill(target_name)
                             time.sleep(2)
-                            result = page.locator(f'div[data-e2e="chat-list-item"]:has-text("{target_name}"), li:has-text("{target_name}")')
+                            result = page.locator(f'[data-e2e="dm-new-conversation-item"]:has-text("{target_name}"), li:has-text("{target_name}")')
                             if result.count() > 0:
                                 result.first.click()
                                 found = True

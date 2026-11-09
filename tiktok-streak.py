@@ -673,93 +673,64 @@ def print_dashboard():
     print("=" * 58)
 
 
-def parse_contact_indices(input_str: str, max_count: int) -> list:
-    """Parse string like '1, 2, 4-7, 10' or 'all' into 0-based indices."""
-    cleaned = input_str.strip().lower()
-    if cleaned in ("all", "semua", "*"):
-        return list(range(max_count))
-    indices = set()
-    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
-    for p in parts:
-        if "-" in p:
-            sub = p.split("-", 1)
-            if sub[0].isdigit() and sub[1].isdigit():
-                start, end = int(sub[0]), int(sub[1])
-                for x in range(min(start, end), max(start, end) + 1):
-                    if 1 <= x <= max_count:
-                        indices.add(x - 1)
-        elif p.isdigit():
-            val = int(p)
-            if 1 <= val <= max_count:
-                indices.add(val - 1)
-    return sorted(list(indices))
+# ==============================================================================
+# 100% Interactive Terminal Hub (TUI - Powered by Questionary)
+# ==============================================================================
+
+import questionary
+from questionary import Choice, Separator
+
+
+def print_dashboard():
+    cfg = load_config()
+    state = load_state()
+    today_str = str(date.today())
+    has_run_today = state.get("last_success_date") == today_str
+    is_sched_active, sched_desc = get_scheduler_status()
+    is_logged_in = check_login_status()
+
+    mode_name = "🌟 Select All" if cfg.get("mode") == "all" else "👥 Groups / Labeling"
+
+    print("\n" + "=" * 58)
+    print("⚡  TikTok Streak Auto-Saver & Helper Hub")
+    print("=" * 58)
+    print(f"👤 Akun Sesi:      {'🟢 VALID (Aktif)' if is_logged_in else '🔴 Belum Login'}")
+    print(f"📅 Status Hari Ini: {'✅ Streak Sudah Terkirim' if has_run_today else '⏳ Belum Terkirim Hari Ini'}")
+    print(f"👥 Mode Penerima:   {mode_name}")
+    print(f"⏰ Jadwal Auto:     {'🟢' if is_sched_active else '⚪'} {sched_desc}")
+    print("=" * 58 + "\n")
 
 
 def interactive_manage_contacts():
     cfg = load_config()
     contacts = cfg.get("contacts", [])
     if not contacts:
-        print("\n[!] Belum ada kontak yang tersimpan. Lakukan 'Pindai Kontak' terlebih dahulu di Menu 3.")
-        input("Tekan [ENTER] untuk kembali...")
+        print("\n[!] Belum ada kontak yang tersimpan. Silakan pilih 'Pindai Kontak' di Menu Utama terlebih dahulu.\n")
+        questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
         return
 
     groups = cfg.get("groups", {})
+    choices = []
+    for c in contacts:
+        assigned = [g for g, d in groups.items() if c in d.get("members", [])]
+        status_str = f"Grup: {', '.join(assigned)}" if assigned else "Belum ada grup"
+        is_checked = len(assigned) > 0
+        choices.append(Choice(title=f"{c:<22} ({status_str})", value=c, checked=is_checked))
 
-    print("\n📋 Mode Pemilihan Kontak:")
-    print(" [1] 🎯 Interactive Cursor (Pakai Panah [↑/↓], [Spasi] Centang, [a] Select All) [Rekomendasi]")
-    print(" [2] 🔢 Input Array Nomor Sekaligus (Contoh: 1, 2, 3, 5-10 atau 'all')")
-    print(" [0] 🔙 Batal")
-    mode_pick = input("Pilih mode [1/2]: ").strip()
+    print("\n💡 Petunjuk:")
+    print(" • [↑ / ↓] Panah keyboard untuk navigasi")
+    print(" • [Spasi] untuk centang / batalkan centang")
+    print(" • [a] untuk Pilih Semua (Select All) / Batal Semua")
+    print(" • [Enter] untuk konfirmasi pilihan Anda\n")
 
-    selected_contacts = []
-
-    if mode_pick == "1":
-        try:
-            import questionary
-            from questionary import Choice
-
-            choices = []
-            for c in contacts:
-                assigned = [g for g, d in groups.items() if c in d.get("members", [])]
-                status_str = f"Label: {', '.join(assigned)}" if assigned else "Belum ada grup"
-                is_checked = len(assigned) > 0
-                choices.append(Choice(title=f"{c:<22} ({status_str})", value=c, checked=is_checked))
-
-            print("\n💡 Petunjuk:")
-            print(" • Gunakan tombol Panah [↑ / ↓] untuk memilih kontak")
-            print(" • Tekan [Spasi] untuk centang / hilangkan centang")
-            print(" • Tekan [a] untuk Pilih Semua (Select All) / Batal Semua")
-            print(" • Tekan [Enter] untuk konfirmasi pilihan Anda\n")
-
-            selected_contacts = questionary.checkbox(
-                "Pilih kontak-kontak yang ingin dimasukkan ke grup:",
-                choices=choices,
-                instruction="(Spasi: pilih, a: select all, Enter: konfirmasi)"
-            ).ask()
-
-        except Exception as e:
-            print(f"[!] Error interactive UI: {e}. Beralih ke input nomor.")
-            mode_pick = "2"
-
-    if mode_pick == "2":
-        print("\n📋 DAFTAR KONTAK TERDETEKSI:")
-        for idx, c in enumerate(contacts, 1):
-            assigned = [g for g, d in groups.items() if c in d.get("members", [])]
-            status_str = f"Label: {', '.join(assigned)}" if assigned else "Belum ada grup"
-            print(f" [{idx:2d}] {c:<22} ({status_str})")
-
-        print("\n💡 Masukkan nomor sekaligus:")
-        print(" • Pisah dengan koma: 1, 2, 3, 5")
-        print(" • Pakai rentang: 1-10, 15, 20-25")
-        print(" • Ketik 'all' untuk memilih seluruh 30 kontak")
-        val = input("\nPilihan nomor: ").strip()
-        if not val:
-            return
-        indices = parse_contact_indices(val, len(contacts))
-        selected_contacts = [contacts[i] for i in indices]
+    selected_contacts = questionary.checkbox(
+        "Pilih kontak-kontak yang ingin diatur:",
+        choices=choices,
+        instruction="(Spasi: pilih, a: select all, Enter: konfirmasi)"
+    ).ask()
 
     if not selected_contacts:
-        print("[*] Tidak ada kontak yang dipilih. Dibatalkan.")
+        print("\n[*] Tidak ada kontak yang dipilih. Dibatalkan.\n")
         return
 
     print(f"\n[✓] {len(selected_contacts)} Kontak Terpilih:")
@@ -769,151 +740,203 @@ def interactive_manage_contacts():
         print(f"  ... dan {len(selected_contacts) - 6} kontak lainnya.")
 
     grp_names = list(groups.keys())
-    action_choices = grp_names + ["[+] Buat Grup Baru", "[x] Hapus dari Semua Grup (Reset)", "[🔙] Batal"]
+    action_choices = [
+        Choice(f"📁 Masukkan ke grup '{g_n}'", value=g_n) for g_n in grp_names
+    ] + [
+        Separator(),
+        Choice("➕ Buat Grup Baru", value="__CREATE_GROUP__"),
+        Choice("🗑️  Hapus dari Semua Grup (Reset)", value="__RESET__"),
+        Choice("🔙 Batal", value="__CANCEL__")
+    ]
 
-    try:
-        import questionary
-        chosen_action = questionary.select(
-            f"\nMasukkan {len(selected_contacts)} kontak ini ke grup mana?",
-            choices=action_choices
-        ).ask()
-    except Exception:
-        print(f"\nMasukkan {len(selected_contacts)} kontak ini ke grup mana?")
-        for g_idx, g_n in enumerate(grp_names, 1):
-            print(f"  [{g_idx}] {g_n}")
-        print(f"  [{len(grp_names) + 1}] [+] Buat Grup Baru")
-        print(f"  [{len(grp_names) + 2}] [x] Hapus dari Semua Grup (Reset)")
-        print(f"  [0] Batal")
-        ch = input("Pilihan: ").strip()
-        if ch.isdigit():
-            ch_int = int(ch)
-            if 1 <= ch_int <= len(grp_names):
-                chosen_action = grp_names[ch_int - 1]
-            elif ch_int == len(grp_names) + 1:
-                chosen_action = "[+] Buat Grup Baru"
-            elif ch_int == len(grp_names) + 2:
-                chosen_action = "[x] Hapus dari Semua Grup (Reset)"
-            else:
-                chosen_action = "[🔙] Batal"
-        else:
-            chosen_action = "[🔙] Batal"
+    chosen_action = questionary.select(
+        f"\nPilih tindakan untuk {len(selected_contacts)} kontak ini:",
+        choices=action_choices
+    ).ask()
 
-    if chosen_action in ("[🔙] Batal", None):
-        print("[*] Dibatalkan.")
+    if chosen_action in ("__CANCEL__", None):
+        print("[*] Dibatalkan.\n")
         return
 
-    if chosen_action == "[+] Buat Grup Baru":
-        new_g = input("Nama grup baru: ").strip()
-        if not new_g:
-            print("[!] Nama grup tidak boleh kosong.")
+    if chosen_action == "__CREATE_GROUP__":
+        new_g = questionary.text("Masukkan nama grup baru:").ask()
+        if not new_g or not new_g.strip():
+            print("[!] Nama grup tidak boleh kosong.\n")
             return
-        new_msg = input(f"Pesan streak untuk grup '{new_g}': ").strip() or "🔥"
+        new_g = new_g.strip()
+        new_msg = questionary.text(f"Pesan streak untuk grup '{new_g}':", default="🔥").ask() or "🔥"
         groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
         chosen_action = new_g
 
-    if chosen_action == "[x] Hapus dari Semua Grup (Reset)":
+    if chosen_action == "__RESET__":
         for g_n in groups:
             groups[g_n]["members"] = [m for m in groups[g_n].get("members", []) if m not in selected_contacts]
-        print(f"[✓] {len(selected_contacts)} kontak berhasil dihapus dari semua grup.")
+        print(f"\n[✓] {len(selected_contacts)} kontak berhasil dihapus dari semua grup.\n")
     else:
         target_members = groups[chosen_action].setdefault("members", [])
-        added_count = 0
         for sc in selected_contacts:
             if sc not in target_members:
                 target_members.append(sc)
-                added_count += 1
-        print(f"[✓] Berhasil memasukkan {len(selected_contacts)} kontak ke grup '{chosen_action}'!")
+        print(f"\n[✓] Berhasil memasukkan {len(selected_contacts)} kontak ke grup '{chosen_action}'!\n")
 
     save_config(cfg)
-    time.sleep(1.5)
+    questionary.press_any_key_to_continue("Tekan tombol apa saja untuk melanjutkan...").ask()
+
+
+def menu_manage_groups():
+    while True:
+        cfg = load_config()
+        groups = cfg.get("groups", {})
+
+        print("\n" + "-" * 55)
+        print("🏷️  DAFTAR GRUP & PESAN KHUSUS:")
+        print("-" * 55)
+        for g_name, g_info in groups.items():
+            members_str = ", ".join(g_info.get("members", [])) or "Belum ada anggota"
+            print(f" • {g_name} ({len(g_info.get('members', []))} anggota):")
+            print(f"   Pesan : \"{g_info.get('message')}\"")
+            print(f"   Anggota: {members_str}")
+        print("-" * 55 + "\n")
+
+        choices = [
+            Choice("➕ Tambah Grup Baru", value="add"),
+            Choice("✏️  Ubah Pesan Grup", value="edit_msg"),
+            Choice("🗑️  Hapus Grup", value="delete"),
+            Separator(),
+            Choice("🔙 Kembali", value="back")
+        ]
+
+        action = questionary.select("Kelola Grup:", choices=choices).ask()
+        if action == "back" or not action:
+            break
+
+        if action == "add":
+            new_g = questionary.text("Nama grup baru:").ask()
+            if new_g and new_g.strip():
+                new_g = new_g.strip()
+                new_msg = questionary.text(f"Pesan untuk grup '{new_g}':", default="🔥").ask() or "🔥"
+                groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
+                save_config(cfg)
+                print(f"[✓] Grup '{new_g}' berhasil dibuat!\n")
+
+        elif action == "edit_msg":
+            g_names = list(groups.keys())
+            if not g_names:
+                print("[!] Tidak ada grup yang tersedia.")
+                continue
+            target_g = questionary.select("Pilih grup yang ingin diubah pesannya:", choices=g_names).ask()
+            if target_g:
+                cur_msg = groups[target_g].get("message", "🔥")
+                new_msg = questionary.text(f"Pesan baru untuk '{target_g}':", default=cur_msg).ask()
+                if new_msg:
+                    groups[target_g]["message"] = new_msg
+                    save_config(cfg)
+                    print(f"[✓] Pesan untuk '{target_g}' berhasil diperbarui!\n")
+
+        elif action == "delete":
+            g_names = list(groups.keys())
+            if not g_names:
+                print("[!] Tidak ada grup yang tersedia.")
+                continue
+            target_g = questionary.select("Pilih grup yang ingin dihapus:", choices=g_names + ["🔙 Batal"]).ask()
+            if target_g and target_g != "🔙 Batal":
+                del groups[target_g]
+                save_config(cfg)
+                print(f"[✓] Grup '{target_g}' telah dihapus.\n")
+
+
+def menu_manage_exclude():
+    while True:
+        cfg = load_config()
+        excludes = cfg.get("select_all", {}).get("exclude", [])
+
+        print("\n" + "-" * 55)
+        print("🚫 DAFTAR BLACKLIST / EXCLUDE (Dilewati di Mode All):")
+        print("-" * 55)
+        for idx, ex in enumerate(excludes, 1):
+            print(f" {idx:2d}. {ex}")
+        print("-" * 55 + "\n")
+
+        choices = [
+            Choice("➕ Tambah Akun ke Blacklist", value="add"),
+            Choice("🗑️  Hapus Akun dari Blacklist (Checklist)", value="remove"),
+            Separator(),
+            Choice("🔙 Kembali", value="back")
+        ]
+
+        action = questionary.select("Kelola Blacklist:", choices=choices).ask()
+        if action == "back" or not action:
+            break
+
+        if action == "add":
+            new_acc = questionary.text("Nama akun yang ingin dilewati/blacklist:").ask()
+            if new_acc and new_acc.strip():
+                excludes.append(new_acc.strip())
+                save_config(cfg)
+                print(f"[✓] '{new_acc.strip()}' ditambahkan ke blacklist.\n")
+
+        elif action == "remove":
+            if not excludes:
+                print("[!] Daftar blacklist masih kosong.")
+                continue
+            to_remove = questionary.checkbox(
+                "Pilih akun yang ingin dihapus dari blacklist:",
+                choices=[Choice(title=e, value=e) for e in excludes]
+            ).ask()
+            if to_remove:
+                cfg["select_all"]["exclude"] = [e for e in excludes if e not in to_remove]
+                save_config(cfg)
+                print(f"[✓] {len(to_remove)} akun berhasil dihapus dari blacklist.\n")
 
 
 def menu_manage_recipients():
     while True:
         cfg = load_config()
         mode = cfg.get("mode", "all")
-        contacts = cfg.get("contacts", [])
+        mode_label = "Select All" if mode == "all" else "Groups / Labeling"
+        default_msg = cfg.get("default_message", "🔥")
 
-        print("\n" + "-" * 55)
-        print(f"👥 Kelola Penerima & Grup [Mode Aktif: {mode.upper()}]")
-        print("-" * 55)
-        print(" [1] 🔄 Ganti Mode (Saat ini: " + ("Select All" if mode == "all" else "Groups") + ")")
-        print(" [2] 📋 Checklist Kontak & Tetapkan Grup (Multi-select / Array)")
-        print(" [3] 🏷️  Kelola Label Grup & Pesan Khusus")
-        print(" [4] 🚫 Kelola Daftar Pengecualian (Blacklist / Exclude)")
-        print(" [5] 💬 Ubah Pesan Default (Saat ini: '" + cfg.get("default_message", "🔥") + "')")
-        print(" [0] 🔙 Kembali ke Menu Utama")
-        print("-" * 55)
+        choices = [
+            Choice(f"🔄 Ganti Mode (Saat ini: {mode_label})", value="toggle_mode"),
+            Choice("📋 Checklist Kontak & Tetapkan Grup (Interactive Multi-select)", value="checklist"),
+            Choice("🏷️  Kelola Label Grup & Pesan Khusus", value="groups"),
+            Choice("🚫 Kelola Daftar Pengecualian (Blacklist / Exclude)", value="exclude"),
+            Choice(f"💬 Ubah Pesan Default (Saat ini: '{default_msg}')", value="default_msg"),
+            Separator(),
+            Choice("🔙 Kembali ke Menu Utama", value="back")
+        ]
 
-        choice = input("Pilih menu [0-5]: ").strip()
-        if choice == "1":
+        action = questionary.select(
+            f"👥 Kelola Penerima & Grup [Mode Aktif: {mode.upper()}]:",
+            choices=choices
+        ).ask()
+
+        if action == "back" or not action:
+            break
+
+        elif action == "toggle_mode":
             cfg["mode"] = "groups" if mode == "all" else "all"
             save_config(cfg)
-            print(f"[✓] Mode berhasil diubah ke: {cfg['mode'].upper()}")
+            print(f"\n[✓] Mode pengiriman diubah ke: {cfg['mode'].upper()}\n")
 
-        elif choice == "2":
+        elif action == "checklist":
             interactive_manage_contacts()
 
-        elif choice == "3":
-            groups = cfg.get("groups", {})
-            print("\n🏷️  DAFTAR GRUP SAAT INI:")
-            for g_name, g_info in groups.items():
-                print(f" • {g_name}:")
-                print(f"   Pesan: \"{g_info.get('message')}\"")
-                print(f"   Anggota ({len(g_info.get('members', []))}): {', '.join(g_info.get('members', [])) or '-'}")
+        elif action == "groups":
+            menu_manage_groups()
 
-            print("\nOpsi: [1] Tambah Grup Baru | [2] Ubah Pesan Grup | [0] Kembali")
-            opt = input("Pilihan: ").strip()
-            if opt == "1":
-                new_g = input("Nama grup baru: ").strip()
-                if new_g and new_g not in groups:
-                    new_msg = input(f"Pesan untuk grup '{new_g}': ").strip() or "🔥"
-                    groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
-                    save_config(cfg)
-                    print(f"[✓] Grup '{new_g}' berhasil dibuat.")
-            elif opt == "2":
-                g_names = list(groups.keys())
-                for idx, g_n in enumerate(g_names, 1):
-                    print(f" [{idx}] {g_n}")
-                ch = input("Pilih grup yang ingin diubah pesannya: ").strip()
-                if ch.isdigit() and 1 <= int(ch) <= len(g_names):
-                    chosen = g_names[int(ch) - 1]
-                    new_msg = input(f"Masukkan pesan baru untuk '{chosen}': ").strip()
-                    if new_msg:
-                        groups[chosen]["message"] = new_msg
-                        save_config(cfg)
-                        print("[✓] Pesan grup berhasil diperbarui.")
+        elif action == "exclude":
+            menu_manage_exclude()
 
-        elif choice == "4":
-            excludes = cfg.get("select_all", {}).get("exclude", [])
-            print(f"\n🚫 DAFTAR BLACKLIST / EXCLUDE (Tidak dikirimi di mode All):")
-            for idx, ex in enumerate(excludes, 1):
-                print(f" [{idx}] {ex}")
-            print("\nOpsi: [1] Tambah Nama | [2] Hapus Nama | [0] Kembali")
-            opt = input("Pilihan: ").strip()
-            if opt == "1":
-                add_name = input("Nama akun yang ingin dikecualikan: ").strip()
-                if add_name and add_name not in excludes:
-                    excludes.append(add_name)
-                    save_config(cfg)
-                    print(f"[✓] '{add_name}' ditambahkan ke blacklist.")
-            elif opt == "2":
-                del_idx = input("Nomor yang ingin dihapus: ").strip()
-                if del_idx.isdigit() and 1 <= int(del_idx) <= len(excludes):
-                    removed = excludes.pop(int(del_idx) - 1)
-                    save_config(cfg)
-                    print(f"[✓] '{removed}' dihapus dari blacklist.")
-
-        elif choice == "5":
-            cur = cfg.get("default_message", "🔥")
-            new_def = input(f"Masukkan pesan default baru (saat ini '{cur}'): ").strip()
+        elif action == "default_msg":
+            new_def = questionary.text(
+                "Masukkan pesan default baru:",
+                default=default_msg
+            ).ask()
             if new_def:
                 cfg["default_message"] = new_def
                 save_config(cfg)
-                print("[✓] Pesan default diperbarui.")
-
-        elif choice == "0":
-            break
+                print(f"\n[✓] Pesan default diperbarui menjadi: '{new_def}'\n")
 
 
 def menu_manage_scheduler():
@@ -923,39 +946,49 @@ def menu_manage_scheduler():
         sched = cfg.get("schedule", {"hour": 9, "minute": 0})
         time_str = f"{sched['hour']:02d}:{sched['minute']:02d}"
 
-        print("\n" + "-" * 55)
-        print(f"⏰ Pengatur Jadwal Otomatis Harian [{OS_NAME}]")
-        print("-" * 55)
-        print(f"Status Saat Ini: {'🟢' if is_active else '⚪'} {desc}")
-        print("\nOpsi:")
-        print(f" [1] ⏰ Pasang / Aktifkan Jadwal Harian (Jam {time_str} + Auto Catch-up)")
-        print(f" [2] 🕒 Ubah Jam Eksekusi (Saat ini: Jam {time_str})")
-        print(" [3] 🗑️  Matikan / Hapus Jadwal")
-        print(" [0] 🔙 Kembali ke Menu Utama")
-        print("-" * 55)
+        choices = [
+            Choice(f"⏰ Pasang / Aktifkan Jadwal Harian (Jam {time_str} + Auto Catch-up)", value="install"),
+            Choice(f"🕒 Ubah Jam Eksekusi (Saat ini: Jam {time_str})", value="change_time"),
+            Choice("🗑️  Matikan / Hapus Jadwal", value="remove"),
+            Separator(),
+            Choice("🔙 Kembali ke Menu Utama", value="back")
+        ]
 
-        choice = input("Pilih menu [0-3]: ").strip()
-        if choice == "1":
+        action = questionary.select(
+            f"⏰ Pengatur Jadwal Harian [{OS_NAME}] (Status: {'🟢' if is_active else '⚪'} {desc}):",
+            choices=choices
+        ).ask()
+
+        if action == "back" or not action:
+            break
+
+        elif action == "install":
             install_scheduler()
-        elif choice == "2":
-            new_time = input("Masukkan jam baru (Format JJ:MM, contoh: 08:30): ").strip()
-            if ":" in new_time:
+            questionary.press_any_key_to_continue().ask()
+
+        elif action == "change_time":
+            new_time = questionary.text(
+                "Masukkan jam baru (Format JJ:MM, contoh: 08:30):",
+                default=time_str
+            ).ask()
+            if new_time and ":" in new_time:
                 try:
                     h, m = map(int, new_time.split(":", 1))
                     if 0 <= h <= 23 and 0 <= m <= 59:
                         cfg["schedule"] = {"hour": h, "minute": m}
                         save_config(cfg)
-                        print(f"[✓] Waktu jadwal diubah ke {h:02d}:{m:02d}.")
+                        print(f"\n[✓] Waktu jadwal diubah ke {h:02d}:{m:02d}.")
                         if is_active:
-                            install_scheduler()  # reinstall with new time
+                            install_scheduler()
                     else:
-                        print("[!] Jam atau menit tidak valid.")
+                        print("\n[!] Jam atau menit tidak valid.")
                 except ValueError:
-                    print("[!] Format waktu salah.")
-        elif choice == "3":
+                    print("\n[!] Format waktu salah.")
+            questionary.press_any_key_to_continue().ask()
+
+        elif action == "remove":
             remove_scheduler()
-        elif choice == "0":
-            break
+            questionary.press_any_key_to_continue().ask()
 
 
 def menu_notifications():
@@ -965,66 +998,85 @@ def menu_notifications():
         tg = notifs.get("telegram", {})
         dc = notifs.get("discord", {})
 
-        print("\n" + "-" * 55)
-        print("🔔 Pengaturan Notifikasi ke HP")
-        print("-" * 55)
-        print(f" [1] Telegram Bot    : {'🟢 AKTIF' if tg.get('enabled') else '⚪ Nonaktif'}")
-        print(f" [2] Discord Webhook : {'🟢 AKTIF' if dc.get('enabled') else '⚪ Nonaktif'}")
-        print(f" [3] Tes Kirim Notifikasi Sekarang")
-        print(" [0] 🔙 Kembali ke Menu Utama")
-        print("-" * 55)
+        choices = [
+            Choice(f"📱 Telegram Bot: {'🟢 AKTIF' if tg.get('enabled') else '⚪ Nonaktif'}", value="toggle_tg"),
+            Choice(f"💬 Discord Webhook: {'🟢 AKTIF' if dc.get('enabled') else '⚪ Nonaktif'}", value="toggle_dc"),
+            Choice("🔔 Tes Kirim Notifikasi Sekarang", value="test_notif"),
+            Separator(),
+            Choice("🔙 Kembali ke Menu Utama", value="back")
+        ]
 
-        choice = input("Pilih menu [0-3]: ").strip()
-        if choice == "1":
+        action = questionary.select("🔔 Pengaturan Notifikasi ke HP:", choices=choices).ask()
+        if action == "back" or not action:
+            break
+
+        if action == "toggle_tg":
             tg["enabled"] = not tg.get("enabled", False)
             if tg["enabled"] and not tg.get("bot_token"):
-                tg["bot_token"] = input("Masukkan Telegram Bot Token: ").strip()
-                tg["chat_id"] = input("Masukkan Telegram Chat ID: ").strip()
+                tg["bot_token"] = questionary.text("Masukkan Telegram Bot Token:").ask()
+                tg["chat_id"] = questionary.text("Masukkan Telegram Chat ID:").ask()
             save_config(cfg)
-            print(f"[✓] Telegram Bot sekarang: {'AKTIF' if tg['enabled'] else 'NONAKTIF'}")
+            print(f"\n[✓] Telegram Bot sekarang: {'AKTIF' if tg['enabled'] else 'NONAKTIF'}\n")
 
-        elif choice == "2":
+        elif action == "toggle_dc":
             dc["enabled"] = not dc.get("enabled", False)
             if dc["enabled"] and not dc.get("webhook_url"):
-                dc["webhook_url"] = input("Masukkan Discord Webhook URL: ").strip()
+                dc["webhook_url"] = questionary.text("Masukkan Discord Webhook URL:").ask()
             save_config(cfg)
-            print(f"[✓] Discord Webhook sekarang: {'AKTIF' if dc['enabled'] else 'NONAKTIF'}")
+            print(f"\n[✓] Discord Webhook sekarang: {'AKTIF' if dc['enabled'] else 'NONAKTIF'}\n")
 
-        elif choice == "3":
-            print("[*] Mengirim notifikasi tes...")
+        elif action == "test_notif":
+            print("\n[*] Mengirim notifikasi tes...")
             send_notification("Tes Notifikasi TikTok Streak", "Halo! Notifikasi pengingat streak berhasil terhubung.", success=True)
-            print("[✓] Notifikasi tes dikirim!")
-
-        elif choice == "0":
-            break
+            print("[✓] Notifikasi tes dikirim!\n")
+            questionary.press_any_key_to_continue().ask()
 
 
 def interactive_hub():
     while True:
         print_dashboard()
-        choice = input("Pilih opsi [0-6]: ").strip()
 
-        if choice == "1":
-            run_send_streak(force=True, verbose=True)
-            input("\nTekan [ENTER] untuk kembali ke menu...")
-        elif choice == "2":
-            menu_manage_recipients()
-        elif choice == "3":
-            scan_dm_contacts(verbose=True)
-            input("\nTekan [ENTER] untuk kembali ke menu...")
-        elif choice == "4":
-            menu_manage_scheduler()
-        elif choice == "5":
-            interactive_login()
-            input("\nTekan [ENTER] untuk kembali ke menu...")
-        elif choice == "6":
-            menu_notifications()
-        elif choice == "0":
-            print("\n👋 Sampai jumpa! Streak TikTok Anda aman.")
+        choices = [
+            Choice("🚀 Kirim Streak Sekarang (Run Check-in)", value="run"),
+            Choice("👥 Kelola Penerima & Grup (Select All / Checklist)", value="recipients"),
+            Choice("🔍 Pindai Kontak DM dari TikTok (Auto-detect)", value="scan"),
+            Choice("⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)", value="scheduler"),
+            Choice("🔑 Login / Hubungkan Akun TikTok (Browser Window)", value="login"),
+            Choice("🔔 Pengaturan Notifikasi (Telegram / Discord)", value="notifications"),
+            Separator(),
+            Choice("🚪 Keluar", value="exit")
+        ]
+
+        action = questionary.select(
+            "Pilih Menu:",
+            choices=choices,
+            use_indicator=True
+        ).ask()
+
+        if action in ("exit", None):
+            print("\n👋 Sampai jumpa! Streak TikTok Anda aman.\n")
             break
-        else:
-            print("[!] Pilihan tidak valid.")
-            time.sleep(1)
+
+        elif action == "run":
+            run_send_streak(force=True, verbose=True)
+            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali ke menu...").ask()
+
+        elif action == "recipients":
+            menu_manage_recipients()
+
+        elif action == "scan":
+            scan_dm_contacts(verbose=True)
+            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali ke menu...").ask()
+
+        elif action == "scheduler":
+            menu_manage_scheduler()
+
+        elif action == "login":
+            interactive_login()
+            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali ke menu...").ask()
+
+        elif action == "notifications":
+            menu_notifications()
 
 
 # ==============================================================================

@@ -4,19 +4,25 @@
   <img src="assets/banner.png" alt="tiktok-streak Banner" width="100%" />
 </p>
 
-A zero-hassle, cross-platform 100% interactive cursor CLI hub and daily streak assistant for **TikTok**.
+[![Python 3](https://img.shields.io/badge/Python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#)
+[![Interface](https://img.shields.io/badge/UI-100%25%20Interactive%20Cursor%20TUI-ff0050?style=flat-square)](#)
 
-Modeled around the same simple philosophy as **genshin-checkin**: **"Run and pick options easily."** No manual python execution commands, no JSON hacking, and automatic background streak sending with wake-up catch-up whenever you want it.
+A zero-hassle, cross-platform **100% interactive cursor CLI hub** and daily streak assistant for **TikTok**.
+
+Modeled around the same simple philosophy as **genshin-checkin / hoyolab**: **"Run and pick options easily."** No manual python execution commands, no JSON hacking, full arrow-key cursor navigation, multi-select checkboxes, in-app auto-updating, and automatic background streak sending with wake-up catch-up whenever you want it.
 
 ---
 
 ## 🌟 Fitur Utama
 
-- **Interactive Terminal Hub**: Tampilan dashboard visual di terminal. Cukup ketik `tiktok-streak` dan pilih opsi menggunakan angka `[1-6]`.
-- **Mode "Select All"**: Kirim streak ke semua kontak DM aktif secara otomatis.
+- **100% Interactive Cursor TUI**: Tampilan visual terminal modern dengan navigasi panah (`↑` / `↓`), pilihan checklist spasi (`Space`), tombol `a` untuk *Select All / Invert*, dan `Enter` untuk konfirmasi (tanpa perlu ketik-ketik angka manual). Cukup ketik `tiktok-streak` langsung di terminal!
+- **In-App Auto-Updater**: Setiap kali aplikasi dibuka, sistem secara otomatis mengecek rilis pembaruan terbaru via endpoint `wsnsam.my.id` (dengan fallback GitHub). Dilengkapi visual progress bar, modal changelog pembaruan, dan 1-klik pasang update langsung di tempat tanpa perlu install ulang!
+- **Multi-Select Contact Checklist**: Pilih kontak penerima dengan mudah dalam bentuk array interaktif atau gunakan mode 1-klik *Select All*.
 - **Daftar Pengecualian (Blacklist / Exclude)**: Lewati akun resmi TikTok, akun olshop, atau orang tertentu secara otomatis di mode *Select All*.
-- **Grouping & Labeling**: Kelompokkan kontak ke label (*Sahabat*, *Prioritas*, *Mutual*, dll.) dengan pesan kustom untuk masing-masing grup.
-- **Auto-Scan DM Contacts**: Deteksi otomatis nama-nama kontak di DM TikTok Anda langsung dari menu terminal.
+- **Grouping & Labeling**: Kelompokkan kontak ke label (*Sahabat*, *Prioritas*, *Mutual*, dll.) dengan pesan kustom untuk masing-masing grup (misal: "Pagi bro! Streak 🔥⚡").
+- **Auto-Scan DM Contacts**: Deteksi otomatis nama-nama kontak di DM TikTok Anda langsung dari menu terminal menggunakan browser session yang persisten.
 - **Cross-Platform Daily Automation**:
   - **macOS**: Otomatis mendaftarkan **LaunchAgent** (`launchd`) jam 09:00 pagi. Jika laptop mati atau *sleep*, script otomatis langsung mengejar pengiriman saat laptop dibuka/dinyalakan.
   - **Windows**: Terintegrasi dengan **Windows Task Scheduler** (`schtasks`).
@@ -33,18 +39,18 @@ Modeled around the same simple philosophy as **genshin-checkin**: **"Run and pic
 ==========================================================
 👤 Akun Sesi:      🟢 VALID (Aktif)
 📅 Status Hari Ini: ✅ Streak Sudah Terkirim
-👥 Mode Penerima:   🌟 Select All (Exclude: 3)
+👥 Mode Penerima:   🌟 Select All (Exclude: 4)
 ⏰ Jadwal Auto:     🟢 Active (macOS LaunchAgent / 09:00 AM)
 ==========================================================
- [1] 🚀 Kirim Streak Sekarang (Run Check-in)
- [2] 👥 Kelola Penerima & Grup (Select All / Checklist)
- [3] 🔍 Pindai Kontak DM dari TikTok (Auto-detect)
- [4] ⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)
- [5] 🔑 Login / Hubungkan Akun TikTok (Browser Window)
- [6] 🔔 Pengaturan Notifikasi (Telegram / Discord)
- [0] 🚪 Keluar
-==========================================================
-Pilih opsi [0-6]: 
+? Pilih Menu: (Gunakan tombol panah ↑/↓)
+ ❯ 🚀 Kirim Streak Sekarang (Run Check-in)
+   👥 Kelola Penerima & Grup (Select All / Checklist)
+   🔍 Pindai Kontak DM dari TikTok (Auto-detect)
+   ⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)
+   🔑 Login / Hubungkan Akun TikTok (Browser Window)
+   🔔 Pengaturan Notifikasi (Telegram / Discord)
+   🔄 Cek Pembaruan Aplikasi (Check for Updates)
+   🚪 Keluar
 ```
 
 ---
@@ -64,14 +70,55 @@ Pilih opsi [0-6]:
 
 ### 🪟 Windows
 
-1. Double-click file **`tiktok-streak.bat`** (atau ketik `tiktok-streak.bat` di PowerShell / CMD).
+1. Double-click file **`tiktok-streak.bat`** (atau jalankan `tiktok-streak.bat` di PowerShell / CMD).
+
+---
+
+## 🔄 Pembaruan Otomatis (In-App Auto-Updater)
+
+Aplikasi memiliki sistem update bawaan yang terhubung ke endpoint `https://wsnsam.my.id/api/updates?app=tiktok-streak`:
+
+1. **Auto Check saat Startup**: Tiap kali `tiktok-streak` dibuka, aplikasi akan menampilkan progress bar:
+   ```text
+   [*] Memeriksa pembaruan terbaru... [v1.2.0 - Versi terbaru!]
+   ```
+2. **Pemberitahuan Versi Baru**: Jika ada rilis baru, changelog lengkap akan ditampilkan dengan dialog interaktif:
+   ```text
+   🎉 Pembaruan Baru Tersedia! (v1.2.0 -> v1.3.0)
+   📋 Apa yang baru:
+      • Peningkatan kecepatan pengiriman streak
+      • Fitur penjadwalan kustom fleksibel
+   
+   ? Apakah Anda ingin memasang pembaruan sekarang?
+    ❯ 🚀 Pasang Pembaruan Sekarang (Auto-update in-app)
+      ⏭️  Lewati (Skip untuk sekarang)
+   ```
+3. **In-Place Update**: Saat memilih pasang, skrip akan mengunduh versi terbaru dan memperbarui file secara otomatis, lalu merestart aplikasi tanpa perlu instalasi ulang manual.
 
 ---
 
 ## 🔑 Alur Pemakaian Pertama Kali
 
 1. **Jalankan:** Ketik `tiktok-streak` di terminal.
-2. **Login Akun:** Pilih menu `[5] 🔑 Login / Hubungkan Akun TikTok`. Jendela browser akan terbuka. Login ke akun TikTok Anda (bisa scan QR dari aplikasi TikTok di HP). Tekan ENTER di terminal jika sudah login.
-3. **Pindai Kontak:** Pilih menu `[3] 🔍 Pindai Kontak DM dari TikTok` untuk mendeteksi daftar nama teman Anda.
-4. **Atur Penerima:** Pilih menu `[2] 👥 Kelola Penerima & Grup` untuk menentukan apakah ingin pakai mode *Select All* atau *Grouping*.
-5. **Aktifkan Jadwal:** Pilih menu `[4] ⏰ Pasang / Atur Jadwal Harian` agar berjalan otomatis setiap hari di latar belakang.
+2. **Login Akun:** Pilih menu `🔑 Login / Hubungkan Akun TikTok`. Jendela browser akan terbuka. Login ke akun TikTok Anda (bisa scan QR dari aplikasi TikTok di HP). Tekan ENTER di terminal jika sudah login.
+3. **Pindai Kontak:** Pilih menu `🔍 Pindai Kontak DM dari TikTok` untuk mendeteksi daftar nama teman Anda.
+4. **Atur Penerima:** Pilih menu `👥 Kelola Penerima & Grup` untuk menentukan apakah ingin pakai mode *Select All* atau *Grouping* dengan interactive checkbox list.
+5. **Aktifkan Jadwal:** Pilih menu `⏰ Pasang / Atur Jadwal Harian` agar berjalan otomatis setiap hari di latar belakang.
+
+---
+
+## 🛠️ CLI Flags (Power Users / Unattended)
+
+```bash
+tiktok-streak --cron      # Mode background otomatis (dipakai LaunchAgent / Task Scheduler)
+tiktok-streak --force     # Paksa kirim streak hari ini tanpa dialog
+tiktok-streak --scan      # Jalankan pemindaian kontak DM langsung
+tiktok-streak --login     # Buka jendela login browser langsung
+tiktok-streak --help      # Tampilkan bantuan parameter CLI
+```
+
+---
+
+## 📄 Lisensi
+
+MIT License © 2026 [Sam](https://github.com/sammmms).

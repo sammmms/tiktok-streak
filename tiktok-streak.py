@@ -18,12 +18,128 @@ from datetime import datetime, date
 from pathlib import Path
 
 OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
+APP_NAME = "tiktok-streak"
+APP_VERSION = "1.2.0"
 HOME_DIR = Path.home()
 INSTALL_DIR = HOME_DIR / ".tiktok-streak"
 CONFIG_FILE = INSTALL_DIR / "config.json"
 STATE_FILE = INSTALL_DIR / "last_run.json"
 PROFILE_DIR = INSTALL_DIR / "browser_profile"
 LOG_FILE = INSTALL_DIR / "streak.log"
+SCRIPT_PATH = Path(__file__).resolve()
+
+
+def parse_semver(ver: str) -> tuple:
+    parts = []
+    for x in ver.lstrip("v").split("."):
+        if x.isdigit():
+            parts.append(int(x))
+    return tuple(parts)
+
+
+def check_for_updates(prompt_if_latest: bool = False):
+    """
+    Checks latest update from https://wsnsam.my.id/api/updates?app=tiktok-streak
+    with fallback to raw.githubusercontent.com/.../version.json.
+    Prompts user with changelog and performs in-place in-app updates.
+    """
+    import urllib.request
+    import json
+    import time
+
+    sys.stdout.write("[*] Memeriksa pembaruan terbaru... ")
+    sys.stdout.flush()
+
+    primary_url = f"https://wsnsam.my.id/api/updates?app={APP_NAME}"
+    fallback_url = f"https://raw.githubusercontent.com/sammmms/{APP_NAME}/main/version.json"
+
+    update_data = None
+    for url in [primary_url, fallback_url]:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AutoUpdater)"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    update_data = json.loads(resp.read().decode("utf-8"))
+                    break
+        except Exception:
+            continue
+
+    if not update_data or "version" not in update_data:
+        sys.stdout.write("\r[*] Memeriksa pembaruan terbaru... [Lewati / Offline]\n")
+        sys.stdout.flush()
+        time.sleep(0.3)
+        return
+
+    latest_ver = update_data["version"]
+    if parse_semver(latest_ver) <= parse_semver(APP_VERSION):
+        sys.stdout.write(f"\r[*] Memeriksa pembaruan terbaru... [Versi Terbaru: v{APP_VERSION} ✓]\n")
+        sys.stdout.flush()
+        time.sleep(0.4)
+        if prompt_if_latest:
+            print(f"\n[✓] Anda sudah menggunakan versi terbaru (v{APP_VERSION}).\n")
+            import questionary
+            questionary.press_any_key_to_continue().ask()
+        return
+
+    # Newer version available
+    sys.stdout.write("\r" + " " * 60 + "\r")
+    sys.stdout.flush()
+
+    print("\n" + "=" * 62)
+    print(f"🚀 PEMBARUAN TERSEDIA! (v{APP_VERSION} ➔ v{latest_ver})")
+    print(f"📅 Rilis: {update_data.get('release_date', 'Baru')}")
+    print("=" * 62)
+    print("📋 Catatan Pembaruan (Changelog):")
+    for change in update_data.get("changelog", []):
+        print(f"  • {change}")
+    print("=" * 62 + "\n")
+
+    try:
+        import questionary
+        action = questionary.select(
+            "Apakah Anda ingin memasang pembaruan sekarang?",
+            choices=[
+                "🚀 Pasang Pembaruan Sekarang (Auto-update in-app)",
+                "⏭️  Lewati (Skip untuk sekarang)"
+            ]
+        ).ask()
+    except Exception:
+        action = input("Pasang pembaruan sekarang? [Y/n]: ").strip().lower()
+        action = "yes" if action in ("", "y", "yes") else "no"
+
+    if action and ("Pasang" in action or action == "yes"):
+        print(f"\n⬇️  Mengunduh pembaruan v{latest_ver}...")
+        download_url = update_data.get("download_url")
+        if not download_url:
+            print("[!] URL unduhan tidak tersedia.")
+            return
+
+        try:
+            req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0 (AutoUpdater)"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                new_code = resp.read().decode("utf-8")
+
+            # Update current script
+            with open(SCRIPT_PATH, "w", encoding="utf-8") as f:
+                f.write(new_code)
+            os.chmod(SCRIPT_PATH, 0o755)
+
+            # Also update target install dir if running from local repo
+            target_installed = INSTALL_DIR / "tiktok-streak.py"
+            if target_installed.exists() and target_installed != SCRIPT_PATH:
+                with open(target_installed, "w", encoding="utf-8") as f:
+                    f.write(new_code)
+                os.chmod(target_installed, 0o755)
+
+            print(f"✅ Berhasil memperbarui ke versi v{latest_ver}!")
+            print("🔄 Memulai ulang aplikasi...")
+            time.sleep(1)
+            os.execv(sys.executable, [sys.executable, str(SCRIPT_PATH)] + sys.argv[1:])
+        except Exception as e:
+            print(f"[x] Gagal memasang pembaruan: {e}")
+            input("Tekan [ENTER] untuk melanjutkan...")
+    else:
+        print("[*] Pembaruan dilewati.\n")
 
 DEFAULT_CONFIG = {
     "mode": "all",  # "all" or "groups"
@@ -1043,6 +1159,7 @@ def interactive_hub():
             Choice("⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)", value="scheduler"),
             Choice("🔑 Login / Hubungkan Akun TikTok (Browser Window)", value="login"),
             Choice("🔔 Pengaturan Notifikasi (Telegram / Discord)", value="notifications"),
+            Choice("🔄 Cek Pembaruan Aplikasi (Check for Updates)", value="check_update"),
             Separator(),
             Choice("🚪 Keluar", value="exit")
         ]
@@ -1078,6 +1195,9 @@ def interactive_hub():
         elif action == "notifications":
             menu_notifications()
 
+        elif action == "check_update":
+            check_for_updates(prompt_if_latest=True)
+
 
 # ==============================================================================
 # CLI Entry Point
@@ -1102,6 +1222,8 @@ def main():
     elif args.scan:
         scan_dm_contacts(verbose=True)
     else:
+        # Check update on startup
+        check_for_updates(prompt_if_latest=False)
         # Default interactive TUI
         interactive_hub()
 

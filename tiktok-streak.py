@@ -673,6 +673,161 @@ def print_dashboard():
     print("=" * 58)
 
 
+def parse_contact_indices(input_str: str, max_count: int) -> list:
+    """Parse string like '1, 2, 4-7, 10' or 'all' into 0-based indices."""
+    cleaned = input_str.strip().lower()
+    if cleaned in ("all", "semua", "*"):
+        return list(range(max_count))
+    indices = set()
+    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    for p in parts:
+        if "-" in p:
+            sub = p.split("-", 1)
+            if sub[0].isdigit() and sub[1].isdigit():
+                start, end = int(sub[0]), int(sub[1])
+                for x in range(min(start, end), max(start, end) + 1):
+                    if 1 <= x <= max_count:
+                        indices.add(x - 1)
+        elif p.isdigit():
+            val = int(p)
+            if 1 <= val <= max_count:
+                indices.add(val - 1)
+    return sorted(list(indices))
+
+
+def interactive_manage_contacts():
+    cfg = load_config()
+    contacts = cfg.get("contacts", [])
+    if not contacts:
+        print("\n[!] Belum ada kontak yang tersimpan. Lakukan 'Pindai Kontak' terlebih dahulu di Menu 3.")
+        input("Tekan [ENTER] untuk kembali...")
+        return
+
+    groups = cfg.get("groups", {})
+
+    print("\n📋 Mode Pemilihan Kontak:")
+    print(" [1] 🎯 Interactive Cursor (Pakai Panah [↑/↓], [Spasi] Centang, [a] Select All) [Rekomendasi]")
+    print(" [2] 🔢 Input Array Nomor Sekaligus (Contoh: 1, 2, 3, 5-10 atau 'all')")
+    print(" [0] 🔙 Batal")
+    mode_pick = input("Pilih mode [1/2]: ").strip()
+
+    selected_contacts = []
+
+    if mode_pick == "1":
+        try:
+            import questionary
+            from questionary import Choice
+
+            choices = []
+            for c in contacts:
+                assigned = [g for g, d in groups.items() if c in d.get("members", [])]
+                status_str = f"Label: {', '.join(assigned)}" if assigned else "Belum ada grup"
+                is_checked = len(assigned) > 0
+                choices.append(Choice(title=f"{c:<22} ({status_str})", value=c, checked=is_checked))
+
+            print("\n💡 Petunjuk:")
+            print(" • Gunakan tombol Panah [↑ / ↓] untuk memilih kontak")
+            print(" • Tekan [Spasi] untuk centang / hilangkan centang")
+            print(" • Tekan [a] untuk Pilih Semua (Select All) / Batal Semua")
+            print(" • Tekan [Enter] untuk konfirmasi pilihan Anda\n")
+
+            selected_contacts = questionary.checkbox(
+                "Pilih kontak-kontak yang ingin dimasukkan ke grup:",
+                choices=choices,
+                instruction="(Spasi: pilih, a: select all, Enter: konfirmasi)"
+            ).ask()
+
+        except Exception as e:
+            print(f"[!] Error interactive UI: {e}. Beralih ke input nomor.")
+            mode_pick = "2"
+
+    if mode_pick == "2":
+        print("\n📋 DAFTAR KONTAK TERDETEKSI:")
+        for idx, c in enumerate(contacts, 1):
+            assigned = [g for g, d in groups.items() if c in d.get("members", [])]
+            status_str = f"Label: {', '.join(assigned)}" if assigned else "Belum ada grup"
+            print(f" [{idx:2d}] {c:<22} ({status_str})")
+
+        print("\n💡 Masukkan nomor sekaligus:")
+        print(" • Pisah dengan koma: 1, 2, 3, 5")
+        print(" • Pakai rentang: 1-10, 15, 20-25")
+        print(" • Ketik 'all' untuk memilih seluruh 30 kontak")
+        val = input("\nPilihan nomor: ").strip()
+        if not val:
+            return
+        indices = parse_contact_indices(val, len(contacts))
+        selected_contacts = [contacts[i] for i in indices]
+
+    if not selected_contacts:
+        print("[*] Tidak ada kontak yang dipilih. Dibatalkan.")
+        return
+
+    print(f"\n[✓] {len(selected_contacts)} Kontak Terpilih:")
+    for sc in selected_contacts[:6]:
+        print(f"  • {sc}")
+    if len(selected_contacts) > 6:
+        print(f"  ... dan {len(selected_contacts) - 6} kontak lainnya.")
+
+    grp_names = list(groups.keys())
+    action_choices = grp_names + ["[+] Buat Grup Baru", "[x] Hapus dari Semua Grup (Reset)", "[🔙] Batal"]
+
+    try:
+        import questionary
+        chosen_action = questionary.select(
+            f"\nMasukkan {len(selected_contacts)} kontak ini ke grup mana?",
+            choices=action_choices
+        ).ask()
+    except Exception:
+        print(f"\nMasukkan {len(selected_contacts)} kontak ini ke grup mana?")
+        for g_idx, g_n in enumerate(grp_names, 1):
+            print(f"  [{g_idx}] {g_n}")
+        print(f"  [{len(grp_names) + 1}] [+] Buat Grup Baru")
+        print(f"  [{len(grp_names) + 2}] [x] Hapus dari Semua Grup (Reset)")
+        print(f"  [0] Batal")
+        ch = input("Pilihan: ").strip()
+        if ch.isdigit():
+            ch_int = int(ch)
+            if 1 <= ch_int <= len(grp_names):
+                chosen_action = grp_names[ch_int - 1]
+            elif ch_int == len(grp_names) + 1:
+                chosen_action = "[+] Buat Grup Baru"
+            elif ch_int == len(grp_names) + 2:
+                chosen_action = "[x] Hapus dari Semua Grup (Reset)"
+            else:
+                chosen_action = "[🔙] Batal"
+        else:
+            chosen_action = "[🔙] Batal"
+
+    if chosen_action in ("[🔙] Batal", None):
+        print("[*] Dibatalkan.")
+        return
+
+    if chosen_action == "[+] Buat Grup Baru":
+        new_g = input("Nama grup baru: ").strip()
+        if not new_g:
+            print("[!] Nama grup tidak boleh kosong.")
+            return
+        new_msg = input(f"Pesan streak untuk grup '{new_g}': ").strip() or "🔥"
+        groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
+        chosen_action = new_g
+
+    if chosen_action == "[x] Hapus dari Semua Grup (Reset)":
+        for g_n in groups:
+            groups[g_n]["members"] = [m for m in groups[g_n].get("members", []) if m not in selected_contacts]
+        print(f"[✓] {len(selected_contacts)} kontak berhasil dihapus dari semua grup.")
+    else:
+        target_members = groups[chosen_action].setdefault("members", [])
+        added_count = 0
+        for sc in selected_contacts:
+            if sc not in target_members:
+                target_members.append(sc)
+                added_count += 1
+        print(f"[✓] Berhasil memasukkan {len(selected_contacts)} kontak ke grup '{chosen_action}'!")
+
+    save_config(cfg)
+    time.sleep(1.5)
+
+
 def menu_manage_recipients():
     while True:
         cfg = load_config()
@@ -683,7 +838,7 @@ def menu_manage_recipients():
         print(f"👥 Kelola Penerima & Grup [Mode Aktif: {mode.upper()}]")
         print("-" * 55)
         print(" [1] 🔄 Ganti Mode (Saat ini: " + ("Select All" if mode == "all" else "Groups") + ")")
-        print(" [2] 📋 Checklist Kontak & Tetapkan Grup")
+        print(" [2] 📋 Checklist Kontak & Tetapkan Grup (Multi-select / Array)")
         print(" [3] 🏷️  Kelola Label Grup & Pesan Khusus")
         print(" [4] 🚫 Kelola Daftar Pengecualian (Blacklist / Exclude)")
         print(" [5] 💬 Ubah Pesan Default (Saat ini: '" + cfg.get("default_message", "🔥") + "')")
@@ -697,41 +852,7 @@ def menu_manage_recipients():
             print(f"[✓] Mode berhasil diubah ke: {cfg['mode'].upper()}")
 
         elif choice == "2":
-            if not contacts:
-                print("\n[!] Belum ada kontak yang tersimpan. Lakukan 'Pindai Kontak' terlebih dahulu di Menu 3.")
-                time.sleep(1.5)
-                continue
-
-            print("\n📋 DAFTAR KONTAK TERDETEKSI:")
-            groups = cfg.get("groups", {})
-            for idx, c in enumerate(contacts, 1):
-                # find which group this contact belongs to
-                assigned = [g for g, d in groups.items() if c in d.get("members", [])]
-                status_str = f"Label: {', '.join(assigned)}" if assigned else "Belum ada grup"
-                print(f" [{idx:2d}] {c:<25} ({status_str})")
-
-            print("\nOpsi:")
-            print(" - Masukkan NOMOR kontak untuk menambah/menghapus dari grup.")
-            print(" - Tekan ENTER untuk kembali.")
-            val = input("Pilihan: ").strip()
-            if val.isdigit() and 1 <= int(val) <= len(contacts):
-                target_contact = contacts[int(val) - 1]
-                print(f"\nPilih grup untuk '{target_contact}':")
-                grp_names = list(groups.keys())
-                for g_idx, g_n in enumerate(grp_names, 1):
-                    in_grp = " [SUDAH ADA]" if target_contact in groups[g_n].get("members", []) else ""
-                    print(f"  [{g_idx}] {g_n}{in_grp}")
-                g_choice = input("Nomor grup (atau 0 untuk batal): ").strip()
-                if g_choice.isdigit() and 1 <= int(g_choice) <= len(grp_names):
-                    chosen_g = grp_names[int(g_choice) - 1]
-                    m_list = groups[chosen_g].setdefault("members", [])
-                    if target_contact in m_list:
-                        m_list.remove(target_contact)
-                        print(f"[✓] Menghapus '{target_contact}' dari grup '{chosen_g}'.")
-                    else:
-                        m_list.append(target_contact)
-                        print(f"[✓] Menambahkan '{target_contact}' ke grup '{chosen_g}'.")
-                    save_config(cfg)
+            interactive_manage_contacts()
 
         elif choice == "3":
             groups = cfg.get("groups", {})

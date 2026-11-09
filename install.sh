@@ -36,7 +36,7 @@ fi
 
 echo "⬇️  Memasang pustaka pendukung (Playwright & Requests)..."
 "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1
-"$VENV_DIR/bin/pip" install playwright requests >/dev/null 2>&1
+"$VENV_DIR/bin/pip" install playwright requests questionary >/dev/null 2>&1
 
 echo "🌐 Mengunduh browser Chromium untuk Playwright..."
 "$VENV_DIR/bin/playwright" install chromium >/dev/null 2>&1

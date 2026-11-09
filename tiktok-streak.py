@@ -1,0 +1,914 @@
+#!/usr/bin/env python3
+"""
+⚡ TikTok Streak Auto-Saver & Helper Hub
+Supports: Windows, macOS, Linux
+Interactive Terminal Hub with Grouping, Select All, Auto-Scheduler, and Webhook Notifications.
+Modeled after genshin-checkin.
+"""
+
+import sys
+import os
+import json
+import time
+import shutil
+import platform
+import argparse
+import subprocess
+from datetime import datetime, date
+from pathlib import Path
+
+OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
+HOME_DIR = Path.home()
+INSTALL_DIR = HOME_DIR / ".tiktok-streak"
+CONFIG_FILE = INSTALL_DIR / "config.json"
+STATE_FILE = INSTALL_DIR / "last_run.json"
+PROFILE_DIR = INSTALL_DIR / "browser_profile"
+LOG_FILE = INSTALL_DIR / "streak.log"
+
+DEFAULT_CONFIG = {
+    "mode": "all",  # "all" or "groups"
+    "default_message": "🔥",
+    "select_all": {
+        "enabled": True,
+        "message": "🔥",
+        "exclude": ["TikTok", "TikTok Rewards", "TikTok Shop", "System Notification"]
+    },
+    "groups": {
+        "Sahabat": {
+            "enabled": True,
+            "message": "Pagi bro! Streak 🔥⚡",
+            "members": []
+        },
+        "Prioritas": {
+            "enabled": True,
+            "message": "Semangat harinya ya ❤️🔥",
+            "members": []
+        },
+        "Mutual": {
+            "enabled": True,
+            "message": "🔥",
+            "members": []
+        }
+    },
+    "contacts": [],
+    "headless": True,
+    "schedule": {
+        "hour": 9,
+        "minute": 0
+    },
+    "notifications": {
+        "macos": {"enabled": True},
+        "telegram": {
+            "enabled": False,
+            "bot_token": "",
+            "chat_id": ""
+        },
+        "discord": {
+            "enabled": False,
+            "webhook_url": ""
+        }
+    }
+}
+
+
+# ==============================================================================
+# Configuration & State Management
+# ==============================================================================
+
+def ensure_dirs():
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_config() -> dict:
+    ensure_dirs()
+    if not CONFIG_FILE.exists():
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+            # merge any missing keys from DEFAULT_CONFIG
+            for k, v in DEFAULT_CONFIG.items():
+                if k not in cfg:
+                    cfg[k] = v
+            return cfg
+    except Exception as e:
+        print(f"[!] Warning reading config: {e}. Using defaults.")
+        return DEFAULT_CONFIG.copy()
+
+
+def save_config(cfg: dict):
+    ensure_dirs()
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "last_success_date": None,
+        "last_attempt": None,
+        "sent_count": 0,
+        "failed_count": 0,
+        "last_summary": "Never run"
+    }
+
+
+def save_state(success: bool, sent_count: int, failed_count: int, summary: str):
+    state = load_state()
+    today_str = str(date.today())
+    state["last_attempt"] = datetime.now().isoformat()
+    state["sent_count"] = sent_count
+    state["failed_count"] = failed_count
+    state["last_summary"] = summary
+    if success:
+        state["last_success_date"] = today_str
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+def log_message(msg: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(formatted + "\n")
+    except Exception:
+        pass
+
+
+# ==============================================================================
+# Notifications (macOS Native, Telegram, Discord)
+# ==============================================================================
+
+def send_notification(title: str, text: str, success: bool):
+    cfg = load_config()
+    notifs = cfg.get("notifications", {})
+
+    # 1. macOS native banner
+    if OS_NAME == "Darwin" and notifs.get("macos", {}).get("enabled", True):
+        sound = "default" if success else "Basso"
+        script = f'display notification "{text}" with title "{title}" sound name "{sound}"'
+        try:
+            subprocess.run(["osascript", "-e", script], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    # 2. Telegram Bot
+    tg = notifs.get("telegram", {})
+    if tg.get("enabled") and tg.get("bot_token") and tg.get("chat_id"):
+        try:
+            import requests
+            icon = "✅" if success else "❌"
+            msg = f"{icon} *{title}*\n\n{text}\n\n_Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
+            requests.post(
+                f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage",
+                json={"chat_id": tg["chat_id"], "text": msg, "parse_mode": "Markdown"},
+                timeout=10
+            )
+        except Exception as e:
+            log_message(f"Telegram notification error: {e}")
+
+    # 3. Discord Webhook
+    dc = notifs.get("discord", {})
+    if dc.get("enabled") and dc.get("webhook_url"):
+        try:
+            import requests
+            color = 0x2ECC71 if success else 0xE74C3C
+            payload = {
+                "embeds": [{
+                    "title": title,
+                    "description": text,
+                    "color": color,
+                    "timestamp": datetime.utcnow().isoformat()
+                }]
+            }
+            requests.post(dc["webhook_url"], json=payload, timeout=10)
+        except Exception as e:
+            log_message(f"Discord notification error: {e}")
+
+
+# ==============================================================================
+# Auto Scheduler (LaunchAgent / Windows Task / Crontab)
+# ==============================================================================
+
+def get_scheduler_status() -> tuple:
+    """Returns (is_active: bool, description: str)."""
+    cfg = load_config()
+    sched = cfg.get("schedule", {"hour": 9, "minute": 0})
+    time_str = f"{sched['hour']:02d}:{sched['minute']:02d}"
+
+    if OS_NAME == "Darwin":
+        plist_path = HOME_DIR / "Library/LaunchAgents/com.user.tiktokstreak.plist"
+        if plist_path.exists():
+            # Check if active in launchctl
+            res = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+            if "com.user.tiktokstreak" in res.stdout:
+                return True, f"Active (macOS LaunchAgent @ {time_str} with Wake-up Catch-up)"
+            return True, f"Registered (macOS LaunchAgent @ {time_str})"
+        return False, "Not Installed"
+
+    elif OS_NAME == "Windows":
+        try:
+            res = subprocess.run(["schtasks", "/query", "/tn", "TikTokStreakDaily"], capture_output=True, text=True)
+            if res.returncode == 0:
+                return True, f"Active (Windows Task Scheduler @ {time_str})"
+        except Exception:
+            pass
+        return False, "Not Installed"
+
+    else:
+        # Linux
+        try:
+            res = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+            if "tiktok-streak" in res.stdout:
+                return True, f"Active (Linux Crontab @ {time_str})"
+        except Exception:
+            pass
+        return False, "Not Installed"
+
+
+def install_scheduler():
+    cfg = load_config()
+    hour = cfg.get("schedule", {}).get("hour", 9)
+    minute = cfg.get("schedule", {}).get("minute", 0)
+    time_str = f"{hour:02d}:{minute:02d}"
+
+    # Target executable path
+    bin_path = HOME_DIR / ".local/bin/tiktok-streak"
+    if not bin_path.exists():
+        bin_path = Path(sys.executable).parent / "tiktok-streak"
+
+    if OS_NAME == "Darwin":
+        plist_path = HOME_DIR / "Library/LaunchAgents/com.user.tiktokstreak.plist"
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.tiktokstreak</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{bin_path}</string>
+        <string>--cron</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{hour}</integer>
+        <key>Minute</key>
+        <integer>{minute}</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>{LOG_FILE}</string>
+</dict>
+</plist>
+"""
+        with open(plist_path, "w", encoding="utf-8") as f:
+            f.write(plist_content)
+
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+        subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
+        print(f"\n[✓] macOS LaunchAgent berhasil dipasang!")
+        print(f"    ⏰ Dijadwalkan setiap jam {time_str} pagi.")
+        print(f"    ⚡ Fitur Auto-Catchup: Jika laptop tidur/mati jam {time_str}, script otomatis jalan saat dinyalakan.")
+
+    elif OS_NAME == "Windows":
+        cmd = [
+            "schtasks", "/create", "/tn", "TikTokStreakDaily",
+            "/tr", f'"{sys.executable}" "{INSTALL_DIR / "tiktok-streak.py"}" --cron',
+            "/sc", "daily",
+            "/st", time_str,
+            "/f"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"\n[✓] Windows Task Scheduler berhasil dibuat pada jam {time_str}!")
+        else:
+            print(f"[!] Gagal membuat Windows Task: {res.stderr}")
+
+    else:
+        # Linux Crontab
+        cron_job = f"{minute} {hour} * * * {bin_path} --cron >> {LOG_FILE} 2>&1"
+        try:
+            curr = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+            lines = [l for l in curr.splitlines() if "tiktok-streak" not in l]
+            lines.append(cron_job)
+            new_cron = "\n".join(lines) + "\n"
+            subprocess.run(["crontab", "-"], input=new_cron, text=True, check=True)
+            print(f"\n[✓] Crontab berhasil dipasang untuk jam {time_str}!")
+        except Exception as e:
+            print(f"[!] Gagal mendaftarkan crontab: {e}")
+
+
+def remove_scheduler():
+    if OS_NAME == "Darwin":
+        plist_path = HOME_DIR / "Library/LaunchAgents/com.user.tiktokstreak.plist"
+        if plist_path.exists():
+            subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+            plist_path.unlink(missing_ok=True)
+            print("[✓] macOS LaunchAgent berhasil dihapus.")
+    elif OS_NAME == "Windows":
+        subprocess.run(["schtasks", "/delete", "/tn", "TikTokStreakDaily", "/f"], capture_output=True)
+        print("[✓] Windows Task Scheduler berhasil dihapus.")
+    else:
+        try:
+            curr = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+            lines = [l for l in curr.splitlines() if "tiktok-streak" not in l]
+            new_cron = "\n".join(lines) + "\n"
+            subprocess.run(["crontab", "-"], input=new_cron, text=True, check=True)
+            print("[✓] Crontab berhasil dihapus.")
+        except Exception:
+            pass
+
+
+# ==============================================================================
+# TikTok Browser Engine (Playwright)
+# ==============================================================================
+
+def check_login_status() -> bool:
+    """Check if browser profile directory has cookies/storage state."""
+    if not PROFILE_DIR.exists():
+        return False
+    # Check if Default or Storage directories exist inside profile
+    storage_state = list(PROFILE_DIR.glob("**/*Cookies*")) + list(PROFILE_DIR.glob("**/*storage*"))
+    return len(storage_state) > 0
+
+
+def interactive_login():
+    """Opens a visible browser window for the user to log in."""
+    print("\n" + "=" * 58)
+    print("🔑 Login Akun TikTok (Interactive Browser)")
+    print("=" * 58)
+    print("1. Jendela browser akan terbuka secara otomatis.")
+    print("2. Silakan login (bisa scan QR via aplikasi TikTok di HP atau email/password).")
+    print("3. Setelah berhasil masuk ke Beranda TikTok, kembali ke sini.")
+    print("=" * 58)
+    input("\nTekan [ENTER] untuk membuka browser...")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[!] Modul 'playwright' belum terpasang. Jalankan install.sh terlebih dahulu.")
+        return
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=False,
+            viewport={"width": 1280, "height": 800},
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto("https://www.tiktok.com/login", wait_until="networkidle")
+
+        input("\n👉 Jika Anda sudah BERHASIL LOGIN di browser, tekan [ENTER] di terminal ini...")
+        context.close()
+
+    print("\n[✓] Sesi login berhasil disimpan di komputer!")
+
+
+def scan_dm_contacts(verbose: bool = True) -> list:
+    """Scans and updates contact list from TikTok Web DM."""
+    if verbose:
+        print("\n[*] Menghubungkan ke TikTok untuk memindai daftar kontak DM...")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[!] Modul 'playwright' belum terpasang.")
+        return []
+
+    cfg = load_config()
+    detected_contacts = []
+
+    with sync_playwright() as p:
+        try:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(PROFILE_DIR),
+                headless=True,
+                viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto("https://www.tiktok.com/messages", wait_until="networkidle", timeout=60000)
+            time.sleep(5)
+
+            if "login" in page.url:
+                if verbose:
+                    print("[!] Sesi login kedaluwarsa. Silakan lakukan Login Akun terlebih dahulu.")
+                context.close()
+                return []
+
+            items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+            count = items.count()
+
+            for i in range(count):
+                raw_text = items.nth(i).inner_text().strip()
+                lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+                if lines:
+                    name = lines[0]
+                    if name and name not in detected_contacts:
+                        detected_contacts.append(name)
+
+            context.close()
+        except Exception as e:
+            if verbose:
+                print(f"[x] Gagal memindai kontak: {e}")
+
+    if detected_contacts:
+        cfg["contacts"] = detected_contacts
+        save_config(cfg)
+        if verbose:
+            print(f"\n[✓] Berhasil menemukan {len(detected_contacts)} kontak di DM TikTok:")
+            print("-" * 50)
+            for idx, name in enumerate(detected_contacts, 1):
+                print(f" {idx:2d}. {name}")
+            print("-" * 50)
+    else:
+        if verbose:
+            print("[-] Tidak ada percakapan aktif yang terdeteksi.")
+
+    return detected_contacts
+
+
+def send_message_in_chat(page, message: str) -> bool:
+    try:
+        box = page.locator('div[contenteditable="true"]')
+        box.wait_for(state="visible", timeout=8000)
+        box.click()
+        box.fill(message)
+        time.sleep(0.5)
+        page.keyboard.press("Enter")
+        time.sleep(2)
+        return True
+    except Exception as e:
+        return False
+
+
+def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
+    """Executes streak sending logic."""
+    state = load_state()
+    today_str = str(date.today())
+
+    if not force and state.get("last_success_date") == today_str:
+        msg = f"Streak untuk hari ini ({today_str}) sudah berhasil dikirim sebelumnya. Lewati."
+        if verbose:
+            print(f"[*] {msg}")
+        return {"success": True, "message": msg, "sent": state.get("sent_count", 0)}
+
+    cfg = load_config()
+    mode = cfg.get("mode", "all")
+    default_msg = cfg.get("default_message", "🔥")
+
+    log_message("Memulai proses pengiriman streak harian...")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        err = "Modul 'playwright' belum terpasang."
+        log_message(err)
+        return {"success": False, "message": err}
+
+    success_list = []
+    fail_list = []
+
+    with sync_playwright() as p:
+        try:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(PROFILE_DIR),
+                headless=cfg.get("headless", True),
+                viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto("https://www.tiktok.com/messages", wait_until="networkidle", timeout=60000)
+            time.sleep(5)
+
+            if "login" in page.url:
+                raise Exception("Sesi login berakhir. Perlu login ulang lewat menu Login.")
+
+            # MODE A: SELECT ALL
+            if mode == "all":
+                select_all_cfg = cfg.get("select_all", {})
+                msg_to_send = select_all_cfg.get("message", default_msg)
+                exclude_list = [x.lower() for x in select_all_cfg.get("exclude", [])]
+
+                chat_items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+                total = chat_items.count()
+                if verbose:
+                    print(f"[*] Mode SELECT ALL: Memeriksa {total} kontak chat DM...")
+
+                for i in range(total):
+                    item = chat_items.nth(i)
+                    name = item.inner_text().split("\n")[0].strip()
+
+                    if name.lower() in exclude_list:
+                        if verbose:
+                            print(f"  [-] Melewati {name} (ada di daftar blacklist)")
+                        continue
+
+                    if verbose:
+                        print(f"  [>] Mengirim streak ke {name}...")
+                    item.click()
+                    time.sleep(2)
+                    if send_message_in_chat(page, msg_to_send):
+                        success_list.append(name)
+                        if verbose:
+                            print(f"      [✓] Terkirim!")
+                    else:
+                        fail_list.append(name)
+                        if verbose:
+                            print(f"      [x] Gagal kirim pesan.")
+                    time.sleep(1)
+
+            # MODE B: GROUPS / LABELING
+            else:
+                groups = cfg.get("groups", {})
+                # build recipient dictionary: { member_name: custom_message }
+                recipients = {}
+                for g_name, g_info in groups.items():
+                    if not g_info.get("enabled", True):
+                        continue
+                    g_msg = g_info.get("message", default_msg)
+                    for member in g_info.get("members", []):
+                        recipients[member] = g_msg
+
+                if not recipients:
+                    raise Exception("Mode Groups aktif, tetapi tidak ada anggota di dalam grup.")
+
+                if verbose:
+                    print(f"[*] Mode GROUPS: Memproses {len(recipients)} orang target...")
+
+                for target_name, custom_msg in recipients.items():
+                    if verbose:
+                        print(f"  [>] Mencari kontak '{target_name}'...")
+
+                    # Check visible chats first
+                    target_locator = page.locator(f'div[data-e2e="chat-list-item"]:has-text("{target_name}"), li[class*="chat-item"]:has-text("{target_name}")')
+                    found = False
+                    if target_locator.count() > 0:
+                        target_locator.first.click()
+                        found = True
+                    else:
+                        # Try search box
+                        search_box = page.locator('input[placeholder*="Search"], input[type="search"]')
+                        if search_box.count() > 0:
+                            search_box.first.fill(target_name)
+                            time.sleep(2)
+                            result = page.locator(f'div[data-e2e="chat-list-item"]:has-text("{target_name}"), li:has-text("{target_name}")')
+                            if result.count() > 0:
+                                result.first.click()
+                                found = True
+                            search_box.first.fill("")
+
+                    if found:
+                        time.sleep(2)
+                        if send_message_in_chat(page, custom_msg):
+                            success_list.append(f"{target_name} ('{custom_msg}')")
+                            if verbose:
+                                print(f"      [✓] Terkirim ({custom_msg})!")
+                        else:
+                            fail_list.append(target_name)
+                    else:
+                        fail_list.append(f"{target_name} (Tidak ditemukan)")
+                        if verbose:
+                            print(f"      [x] Kontak '{target_name}' tidak ditemukan.")
+                    time.sleep(1)
+
+            context.close()
+        except Exception as e:
+            fail_list.append(f"System Error: {str(e)}")
+            log_message(f"Error during streak run: {e}")
+
+    overall_success = len(success_list) > 0 and len(fail_list) == 0
+    summary = f"Terkirim: {len(success_list)}, Gagal: {len(fail_list)}"
+    save_state(overall_success, len(success_list), len(fail_list), summary)
+
+    # Format notification message
+    report = f"📊 *Laporan Pengiriman Streak TikTok:*\n"
+    if success_list:
+        report += f"\n✅ *Berhasil ({len(success_list)}):*\n- " + "\n- ".join(success_list)
+    if fail_list:
+        report += f"\n\n❌ *Gagal/Lewat ({len(fail_list)}):*\n- " + "\n- ".join(fail_list)
+
+    send_notification(
+        title="TikTok Streak Saver",
+        text=report,
+        success=overall_success
+    )
+
+    log_message(f"Selesai. {summary}")
+    return {
+        "success": overall_success,
+        "message": summary,
+        "sent": len(success_list),
+        "failed": len(fail_list)
+    }
+
+
+# ==============================================================================
+# Interactive Terminal Hub (TUI)
+# ==============================================================================
+
+def print_dashboard():
+    cfg = load_config()
+    state = load_state()
+    today_str = str(date.today())
+    has_run_today = state.get("last_success_date") == today_str
+    is_sched_active, sched_desc = get_scheduler_status()
+    is_logged_in = check_login_status()
+
+    mode_name = "🌟 Select All" if cfg.get("mode") == "all" else "👥 Groups / Labeling"
+    
+    print("\n" + "=" * 58)
+    print("⚡  TikTok Streak Auto-Saver & Helper Hub")
+    print("=" * 58)
+    print(f"👤 Akun Sesi:      {'🟢 VALID (Aktif)' if is_logged_in else '🔴 Belum Login'}")
+    print(f"📅 Status Hari Ini: {'✅ Streak Sudah Terkirim' if has_run_today else '⏳ Belum Terkirim Hari Ini'}")
+    print(f"👥 Mode Penerima:   {mode_name}")
+    print(f"⏰ Jadwal Auto:     {'🟢' if is_sched_active else '⚪'} {sched_desc}")
+    print("=" * 58)
+    print(" [1] 🚀 Kirim Streak Sekarang (Run Check-in)")
+    print(" [2] 👥 Kelola Penerima & Grup (Select All / Checklist)")
+    print(" [3] 🔍 Pindai Kontak DM dari TikTok (Auto-detect)")
+    print(" [4] ⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)")
+    print(" [5] 🔑 Login / Hubungkan Akun TikTok (Browser Window)")
+    print(" [6] 🔔 Pengaturan Notifikasi (Telegram / Discord)")
+    print(" [0] 🚪 Keluar")
+    print("=" * 58)
+
+
+def menu_manage_recipients():
+    while True:
+        cfg = load_config()
+        mode = cfg.get("mode", "all")
+        contacts = cfg.get("contacts", [])
+
+        print("\n" + "-" * 55)
+        print(f"👥 Kelola Penerima & Grup [Mode Aktif: {mode.upper()}]")
+        print("-" * 55)
+        print(" [1] 🔄 Ganti Mode (Saat ini: " + ("Select All" if mode == "all" else "Groups") + ")")
+        print(" [2] 📋 Checklist Kontak & Tetapkan Grup")
+        print(" [3] 🏷️  Kelola Label Grup & Pesan Khusus")
+        print(" [4] 🚫 Kelola Daftar Pengecualian (Blacklist / Exclude)")
+        print(" [5] 💬 Ubah Pesan Default (Saat ini: '" + cfg.get("default_message", "🔥") + "')")
+        print(" [0] 🔙 Kembali ke Menu Utama")
+        print("-" * 55)
+
+        choice = input("Pilih menu [0-5]: ").strip()
+        if choice == "1":
+            cfg["mode"] = "groups" if mode == "all" else "all"
+            save_config(cfg)
+            print(f"[✓] Mode berhasil diubah ke: {cfg['mode'].upper()}")
+
+        elif choice == "2":
+            if not contacts:
+                print("\n[!] Belum ada kontak yang tersimpan. Lakukan 'Pindai Kontak' terlebih dahulu di Menu 3.")
+                time.sleep(1.5)
+                continue
+
+            print("\n📋 DAFTAR KONTAK TERDETEKSI:")
+            groups = cfg.get("groups", {})
+            for idx, c in enumerate(contacts, 1):
+                # find which group this contact belongs to
+                assigned = [g for g, d in groups.items() if c in d.get("members", [])]
+                status_str = f"Label: {', '.join(assigned)}" if assigned else "Belum ada grup"
+                print(f" [{idx:2d}] {c:<25} ({status_str})")
+
+            print("\nOpsi:")
+            print(" - Masukkan NOMOR kontak untuk menambah/menghapus dari grup.")
+            print(" - Tekan ENTER untuk kembali.")
+            val = input("Pilihan: ").strip()
+            if val.isdigit() and 1 <= int(val) <= len(contacts):
+                target_contact = contacts[int(val) - 1]
+                print(f"\nPilih grup untuk '{target_contact}':")
+                grp_names = list(groups.keys())
+                for g_idx, g_n in enumerate(grp_names, 1):
+                    in_grp = " [SUDAH ADA]" if target_contact in groups[g_n].get("members", []) else ""
+                    print(f"  [{g_idx}] {g_n}{in_grp}")
+                g_choice = input("Nomor grup (atau 0 untuk batal): ").strip()
+                if g_choice.isdigit() and 1 <= int(g_choice) <= len(grp_names):
+                    chosen_g = grp_names[int(g_choice) - 1]
+                    m_list = groups[chosen_g].setdefault("members", [])
+                    if target_contact in m_list:
+                        m_list.remove(target_contact)
+                        print(f"[✓] Menghapus '{target_contact}' dari grup '{chosen_g}'.")
+                    else:
+                        m_list.append(target_contact)
+                        print(f"[✓] Menambahkan '{target_contact}' ke grup '{chosen_g}'.")
+                    save_config(cfg)
+
+        elif choice == "3":
+            groups = cfg.get("groups", {})
+            print("\n🏷️  DAFTAR GRUP SAAT INI:")
+            for g_name, g_info in groups.items():
+                print(f" • {g_name}:")
+                print(f"   Pesan: \"{g_info.get('message')}\"")
+                print(f"   Anggota ({len(g_info.get('members', []))}): {', '.join(g_info.get('members', [])) or '-'}")
+
+            print("\nOpsi: [1] Tambah Grup Baru | [2] Ubah Pesan Grup | [0] Kembali")
+            opt = input("Pilihan: ").strip()
+            if opt == "1":
+                new_g = input("Nama grup baru: ").strip()
+                if new_g and new_g not in groups:
+                    new_msg = input(f"Pesan untuk grup '{new_g}': ").strip() or "🔥"
+                    groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
+                    save_config(cfg)
+                    print(f"[✓] Grup '{new_g}' berhasil dibuat.")
+            elif opt == "2":
+                g_names = list(groups.keys())
+                for idx, g_n in enumerate(g_names, 1):
+                    print(f" [{idx}] {g_n}")
+                ch = input("Pilih grup yang ingin diubah pesannya: ").strip()
+                if ch.isdigit() and 1 <= int(ch) <= len(g_names):
+                    chosen = g_names[int(ch) - 1]
+                    new_msg = input(f"Masukkan pesan baru untuk '{chosen}': ").strip()
+                    if new_msg:
+                        groups[chosen]["message"] = new_msg
+                        save_config(cfg)
+                        print("[✓] Pesan grup berhasil diperbarui.")
+
+        elif choice == "4":
+            excludes = cfg.get("select_all", {}).get("exclude", [])
+            print(f"\n🚫 DAFTAR BLACKLIST / EXCLUDE (Tidak dikirimi di mode All):")
+            for idx, ex in enumerate(excludes, 1):
+                print(f" [{idx}] {ex}")
+            print("\nOpsi: [1] Tambah Nama | [2] Hapus Nama | [0] Kembali")
+            opt = input("Pilihan: ").strip()
+            if opt == "1":
+                add_name = input("Nama akun yang ingin dikecualikan: ").strip()
+                if add_name and add_name not in excludes:
+                    excludes.append(add_name)
+                    save_config(cfg)
+                    print(f"[✓] '{add_name}' ditambahkan ke blacklist.")
+            elif opt == "2":
+                del_idx = input("Nomor yang ingin dihapus: ").strip()
+                if del_idx.isdigit() and 1 <= int(del_idx) <= len(excludes):
+                    removed = excludes.pop(int(del_idx) - 1)
+                    save_config(cfg)
+                    print(f"[✓] '{removed}' dihapus dari blacklist.")
+
+        elif choice == "5":
+            cur = cfg.get("default_message", "🔥")
+            new_def = input(f"Masukkan pesan default baru (saat ini '{cur}'): ").strip()
+            if new_def:
+                cfg["default_message"] = new_def
+                save_config(cfg)
+                print("[✓] Pesan default diperbarui.")
+
+        elif choice == "0":
+            break
+
+
+def menu_manage_scheduler():
+    while True:
+        is_active, desc = get_scheduler_status()
+        cfg = load_config()
+        sched = cfg.get("schedule", {"hour": 9, "minute": 0})
+        time_str = f"{sched['hour']:02d}:{sched['minute']:02d}"
+
+        print("\n" + "-" * 55)
+        print(f"⏰ Pengatur Jadwal Otomatis Harian [{OS_NAME}]")
+        print("-" * 55)
+        print(f"Status Saat Ini: {'🟢' if is_active else '⚪'} {desc}")
+        print("\nOpsi:")
+        print(f" [1] ⏰ Pasang / Aktifkan Jadwal Harian (Jam {time_str} + Auto Catch-up)")
+        print(f" [2] 🕒 Ubah Jam Eksekusi (Saat ini: Jam {time_str})")
+        print(" [3] 🗑️  Matikan / Hapus Jadwal")
+        print(" [0] 🔙 Kembali ke Menu Utama")
+        print("-" * 55)
+
+        choice = input("Pilih menu [0-3]: ").strip()
+        if choice == "1":
+            install_scheduler()
+        elif choice == "2":
+            new_time = input("Masukkan jam baru (Format JJ:MM, contoh: 08:30): ").strip()
+            if ":" in new_time:
+                try:
+                    h, m = map(int, new_time.split(":", 1))
+                    if 0 <= h <= 23 and 0 <= m <= 59:
+                        cfg["schedule"] = {"hour": h, "minute": m}
+                        save_config(cfg)
+                        print(f"[✓] Waktu jadwal diubah ke {h:02d}:{m:02d}.")
+                        if is_active:
+                            install_scheduler()  # reinstall with new time
+                    else:
+                        print("[!] Jam atau menit tidak valid.")
+                except ValueError:
+                    print("[!] Format waktu salah.")
+        elif choice == "3":
+            remove_scheduler()
+        elif choice == "0":
+            break
+
+
+def menu_notifications():
+    while True:
+        cfg = load_config()
+        notifs = cfg.get("notifications", {})
+        tg = notifs.get("telegram", {})
+        dc = notifs.get("discord", {})
+
+        print("\n" + "-" * 55)
+        print("🔔 Pengaturan Notifikasi ke HP")
+        print("-" * 55)
+        print(f" [1] Telegram Bot    : {'🟢 AKTIF' if tg.get('enabled') else '⚪ Nonaktif'}")
+        print(f" [2] Discord Webhook : {'🟢 AKTIF' if dc.get('enabled') else '⚪ Nonaktif'}")
+        print(f" [3] Tes Kirim Notifikasi Sekarang")
+        print(" [0] 🔙 Kembali ke Menu Utama")
+        print("-" * 55)
+
+        choice = input("Pilih menu [0-3]: ").strip()
+        if choice == "1":
+            tg["enabled"] = not tg.get("enabled", False)
+            if tg["enabled"] and not tg.get("bot_token"):
+                tg["bot_token"] = input("Masukkan Telegram Bot Token: ").strip()
+                tg["chat_id"] = input("Masukkan Telegram Chat ID: ").strip()
+            save_config(cfg)
+            print(f"[✓] Telegram Bot sekarang: {'AKTIF' if tg['enabled'] else 'NONAKTIF'}")
+
+        elif choice == "2":
+            dc["enabled"] = not dc.get("enabled", False)
+            if dc["enabled"] and not dc.get("webhook_url"):
+                dc["webhook_url"] = input("Masukkan Discord Webhook URL: ").strip()
+            save_config(cfg)
+            print(f"[✓] Discord Webhook sekarang: {'AKTIF' if dc['enabled'] else 'NONAKTIF'}")
+
+        elif choice == "3":
+            print("[*] Mengirim notifikasi tes...")
+            send_notification("Tes Notifikasi TikTok Streak", "Halo! Notifikasi pengingat streak berhasil terhubung.", success=True)
+            print("[✓] Notifikasi tes dikirim!")
+
+        elif choice == "0":
+            break
+
+
+def interactive_hub():
+    while True:
+        print_dashboard()
+        choice = input("Pilih opsi [0-6]: ").strip()
+
+        if choice == "1":
+            run_send_streak(force=True, verbose=True)
+            input("\nTekan [ENTER] untuk kembali ke menu...")
+        elif choice == "2":
+            menu_manage_recipients()
+        elif choice == "3":
+            scan_dm_contacts(verbose=True)
+            input("\nTekan [ENTER] untuk kembali ke menu...")
+        elif choice == "4":
+            menu_manage_scheduler()
+        elif choice == "5":
+            interactive_login()
+            input("\nTekan [ENTER] untuk kembali ke menu...")
+        elif choice == "6":
+            menu_notifications()
+        elif choice == "0":
+            print("\n👋 Sampai jumpa! Streak TikTok Anda aman.")
+            break
+        else:
+            print("[!] Pilihan tidak valid.")
+            time.sleep(1)
+
+
+# ==============================================================================
+# CLI Entry Point
+# ==============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="⚡ TikTok Streak Auto-Saver & Helper Hub")
+    parser.add_argument("--cron", action="store_true", help="Run unattended in background via scheduler")
+    parser.add_argument("--force", action="store_true", help="Force send streak even if already sent today")
+    parser.add_argument("--login", action="store_true", help="Open visual browser for login")
+    parser.add_argument("--scan", action="store_true", help="Scan DM contacts from TikTok")
+
+    args = parser.parse_args()
+
+    if args.cron:
+        # Background mode for LaunchAgent / TaskScheduler
+        run_send_streak(force=False, verbose=False)
+    elif args.force:
+        run_send_streak(force=True, verbose=True)
+    elif args.login:
+        interactive_login()
+    elif args.scan:
+        scan_dm_contacts(verbose=True)
+    else:
+        # Default interactive TUI
+        interactive_hub()
+
+
+if __name__ == "__main__":
+    main()

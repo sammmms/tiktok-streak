@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+browser_profile/
+*.log
+config.json
+last_run.json
+.DS_Store

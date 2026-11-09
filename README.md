@@ -1,6 +1,10 @@
 # ⚡ tiktok-streak — TikTok Streak Auto-Saver & Helper Hub
 
-A zero-hassle, cross-platform interactive CLI hub and daily streak assistant for **TikTok**.
+<p align="center">
+  <img src="assets/banner.png" alt="tiktok-streak Banner" width="100%" />
+</p>
+
+A zero-hassle, cross-platform 100% interactive cursor CLI hub and daily streak assistant for **TikTok**.
 
 Modeled around the same simple philosophy as **genshin-checkin**: **"Run and pick options easily."** No manual python execution commands, no JSON hacking, and automatic background streak sending with wake-up catch-up whenever you want it.
 

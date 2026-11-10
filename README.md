@@ -18,13 +18,26 @@ Modeled around the same simple philosophy as **genshin-checkin / hoyolab**: **"R
 ## 🌟 Fitur Utama
 
 - **100% Interactive Cursor TUI**: Tampilan visual terminal modern dengan navigasi panah (`↑` / `↓`), pilihan checklist spasi (`Space`), tombol `a` untuk *Select All / Invert*, dan `Enter` untuk konfirmasi (tanpa perlu ketik-ketik angka manual). Cukup ketik `tiktok-streak` langsung di terminal!
+- **Konfigurasi Pesan Dinamis & Anti-Bot**:
+  - **Daftar Pesan Acak (Message Pool)**: Rotasi variasi pesan otomatis tiap hari agar tidak monoton dan tidak terdeteksi bot/spam oleh TikTok.
+  - **Template Variabel Cerdas**: Mendukung `{name}` (nama kontak), `{first_name}` (nama depan), `{time_greeting}` (Pagi/Siang/Sore/Malam otomatis sesuai jam kirim), `{day}` (Senin/Selasa/...), dan `{date}` (tanggal hari ini).
+  - **Pesan Khusus per Kontak (Contact Overrides)**: Personalisasi pesan spesial untuk kontak tertentu (misal: pacar / sahabat).
+  - **Emoji Booster**: Opsi menambahkan variasi emoji api/energi acak (`🔥`, `⚡`, `✨`, `💪`, `🚀`).
+  - **Pratinjau Pesan (Live Preview)**: Cek simulasi pesan yang akan diterima teman secara real-time sebelum dikirim.
+- **Pengaturan Kecepatan (Pacing) & Anti-Ban**:
+  - Pilihan ritme jeda: *Cepat (1-2s)*, *Normal / Natural (3-5s)*, atau *Santai (5-8s)* dengan natural jitter.
+  - **Batas Jam Aman (Safe Hours)**: Mencegah pengiriman pada tengah malam (misal 07:00 - 23:00) jika laptop terbangun di waktu subuh.
+- **Sistem Audit Logging (Retensi 3 Hari)**:
+  - Menyimpan rekap lengkap seluruh pekerjaan yang dilakukan (pengiriman per kontak, status, pesan terkirim) serta riwayat perubahan konfigurasi.
+  - Otomatis menghapus berkas catatan log yang lebih tua dari 3 hari (*auto-prune*), menjaga penyimpanan tetap hemat dan bersih.
+  - Menu khusus *Log Viewer* interaktif dengan filter kategori (`JOB`, `CONFIG`, `SYSTEM`, `ERROR`).
 - **In-App Auto-Updater**: Setiap kali aplikasi dibuka, sistem secara otomatis mengecek rilis pembaruan terbaru via endpoint `wsnsam.my.id` (dengan fallback GitHub). Dilengkapi visual progress bar, modal changelog pembaruan, dan 1-klik pasang update langsung di tempat tanpa perlu install ulang!
 - **Multi-Select Contact Checklist**: Pilih kontak penerima dengan mudah dalam bentuk array interaktif atau gunakan mode 1-klik *Select All*.
 - **Daftar Pengecualian (Blacklist / Exclude)**: Lewati akun resmi TikTok, akun olshop, atau orang tertentu secara otomatis di mode *Select All*.
-- **Grouping & Labeling**: Kelompokkan kontak ke label (*Sahabat*, *Prioritas*, *Mutual*, dll.) dengan pesan kustom untuk masing-masing grup (misal: "Pagi bro! Streak 🔥⚡").
+- **Grouping & Labeling**: Kelompokkan kontak ke label (*Sahabat*, *Prioritas*, *Mutual*, dll.) dengan pesan kustom untuk masing-masing grup.
 - **Auto-Scan DM Contacts**: Deteksi otomatis nama-nama kontak di DM TikTok Anda langsung dari menu terminal menggunakan browser session yang persisten.
 - **Cross-Platform Daily Automation**:
-  - **macOS**: Otomatis mendaftarkan **LaunchAgent** (`launchd`) jam 09:00 pagi. Jika laptop mati atau *sleep*, script otomatis langsung mengejar pengiriman saat laptop dibuka/dinyalakan.
+  - **macOS**: Otomatis mendaftarkan **LaunchAgent** (`launchd`) jam 09:00 pagi dengan *wake-up internet readiness waiter* dan *hourly catch-up intervals* sepanjang hari.
   - **Windows**: Terintegrasi dengan **Windows Task Scheduler** (`schtasks`).
   - **Linux**: Terintegrasi dengan **Crontab**.
 - **Notifikasi ke HP**: Kirim rekap hasil pengiriman streak ke **Telegram Bot** atau **Discord Webhook**, serta banner notifikasi native macOS.
@@ -38,13 +51,18 @@ Modeled around the same simple philosophy as **genshin-checkin / hoyolab**: **"R
 ⚡  TikTok Streak Auto-Saver & Helper Hub
 ==========================================================
 👤 Akun Sesi:      🟢 VALID (Aktif)
-📅 Status Hari Ini: ✅ Streak Sudah Terkirim
-👥 Mode Penerima:   🌟 Select All (Exclude: 4)
-⏰ Jadwal Auto:     🟢 Active (macOS LaunchAgent / 09:00 AM)
+📅 Status Hari Ini: ✅ Streak Sudah Terkirim (21 kontak)
+👥 Mode Penerima:   👥 Groups / Labeling
+💬 Konfigurasi:     🎲 Pool Acak | ⚡ Pace: Normal
+⏰ Jadwal Auto:     🟢 Active (macOS LaunchAgent @ 09:00 with Wake-up Catch-up)
+📁 Log History:     Tersimpan 3 hari terakhir (Auto-prune)
 ==========================================================
 ? Pilih Menu: (Gunakan tombol panah ↑/↓)
  ❯ 🚀 Kirim Streak Sekarang (Run Check-in)
    👥 Kelola Penerima & Grup (Select All / Checklist)
+   💬 Konfigurasi Pesan & Template (Message Settings)
+   ⚙️  Pengaturan Kecepatan & Sistem (Safety & Browser)
+   📜 Riwayat Aktivitas & Log (Tersimpan 3 Hari)
    🔍 Pindai Kontak DM dari TikTok (Auto-detect)
    ⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)
    🔑 Login / Hubungkan Akun TikTok (Browser Window)

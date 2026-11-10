@@ -15,8 +15,15 @@ import random
 import platform
 import argparse
 import subprocess
+import signal
 from datetime import datetime, date, timedelta
 from pathlib import Path
+
+def handle_sigint(sig=None, frame=None):
+    print("\n\n👋 Operasi dibatalkan oleh pengguna (Keluar). Sampai jumpa!\n")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_sigint)
 
 OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
 APP_NAME = "tiktok-streak"
@@ -2093,4 +2100,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        handle_sigint()

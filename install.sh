@@ -27,22 +27,27 @@ else
 fi
 chmod +x "$INSTALL_DIR/tiktok-streak.py"
 
-# 3. Setup Python Virtual Environment for isolation
-VENV_DIR="$INSTALL_DIR/venv"
+# 3. Setup Shared Python Virtual Environment in ~/.automation-hub/venv
+SHARED_HUB="$HOME/.automation-hub"
+VENV_DIR="$SHARED_HUB/venv"
+mkdir -p "$SHARED_HUB"
+
 if [ ! -d "$VENV_DIR" ]; then
-    echo "📦 Membuat virtual environment Python di $VENV_DIR..."
+    echo "📦 Membuat shared virtual environment di $VENV_DIR..."
     python3 -m venv "$VENV_DIR"
+    echo "⬇️  Memasang pustaka pendukung (Playwright, Requests, Questionary, Pillow)..."
+    "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
+    "$VENV_DIR/bin/pip" install playwright requests questionary pillow >/dev/null 2>&1 || true
+    echo "🌐 Mengunduh browser Chromium untuk Playwright..."
+    "$VENV_DIR/bin/playwright" install chromium >/dev/null 2>&1 || true
 fi
 
-echo "⬇️  Memasang pustaka pendukung (Playwright & Requests)..."
-"$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1
-"$VENV_DIR/bin/pip" install playwright requests questionary >/dev/null 2>&1
-
-echo "🌐 Mengunduh browser Chromium untuk Playwright..."
-"$VENV_DIR/bin/playwright" install chromium >/dev/null 2>&1
+# Link to app dir for backward compatibility
+ln -sfn "$VENV_DIR" "$INSTALL_DIR/venv"
 
 # 4. Create executable wrapper in ~/.local/bin/tiktok-streak
 WRAPPER_FILE="$BIN_DIR/tiktok-streak"
+rm -f "$WRAPPER_FILE"
 cat <<EOF > "$WRAPPER_FILE"
 #!/usr/bin/env bash
 exec "$VENV_DIR/bin/python" "$INSTALL_DIR/tiktok-streak.py" "\$@"

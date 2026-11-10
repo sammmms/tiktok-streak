@@ -260,6 +260,49 @@ def log_message(msg: str):
         pass
 
 
+def wait_for_internet(timeout: int = 180, check_interval: int = 3, verbose: bool = False) -> bool:
+    """
+    Wait for active internet connectivity with DNS resolution.
+    Essential on macOS wake-up because launchd fires before Wi-Fi reconnects.
+    """
+    import socket
+    import urllib.request
+
+    start_time = time.time()
+    last_logged = 0
+
+    while time.time() - start_time < timeout:
+        try:
+            # 1. Quick socket connection to public DNS (Cloudflare / Google)
+            s = socket.create_connection(("1.1.1.1", 53), timeout=3)
+            s.close()
+            # 2. HTTP probe to verify TLS and web routing
+            req = urllib.request.Request(
+                "https://www.google.com",
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status in (200, 204, 301, 302):
+                    elapsed = int(time.time() - start_time)
+                    if elapsed > 2:
+                        log_message(f"Koneksi internet aktif terdeteksi ({elapsed}s setelah bangun).")
+                    elif verbose:
+                        print("[✓] Koneksi internet aktif.")
+                    return True
+        except Exception:
+            pass
+
+        elapsed = int(time.time() - start_time)
+        if elapsed >= 5 and (elapsed - last_logged >= 15):
+            log_message(f"Menunggu koneksi internet aktif ({elapsed}s/{timeout}s)...")
+            last_logged = elapsed
+
+        time.sleep(check_interval)
+
+    log_message(f"Koneksi internet tidak tersedia setelah menunggu {timeout} detik.")
+    return False
+
+
 # ==============================================================================
 # Notifications (macOS Native, Telegram, Discord)
 # ==============================================================================
@@ -268,10 +311,16 @@ def send_notification(title: str, text: str, success: bool):
     cfg = load_config()
     notifs = cfg.get("notifications", {})
 
-    # 1. macOS native banner
+    # 1. macOS native banner (sanitized to avoid AppleScript escaping issues)
     if OS_NAME == "Darwin" and notifs.get("macos", {}).get("enabled", True):
         sound = "default" if success else "Basso"
-        script = f'display notification "{text}" with title "{title}" sound name "{sound}"'
+        clean_title = title.replace('"', '\\"').replace("\n", " ")
+        clean_text = text.replace("*", "").replace('"', "'").strip()
+        lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
+        short_text = " \\n ".join(lines[:3]) if lines else "Status pengiriman streak"
+        if len(short_text) > 200:
+            short_text = short_text[:197] + "..."
+        script = f'display notification "{short_text}" with title "{clean_title}" sound name "{sound}"'
         try:
             subprocess.run(["osascript", "-e", script], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
@@ -366,6 +415,18 @@ def install_scheduler():
         plist_path = HOME_DIR / "Library/LaunchAgents/com.user.tiktokstreak.plist"
         plist_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Build StartCalendarInterval array: scheduled hour + hourly catch-ups until 23:00
+        intervals = []
+        for h in range(hour, 24):
+            m = minute if h == hour else 0
+            intervals.append(f"""        <dict>
+            <key>Hour</key>
+            <integer>{h}</integer>
+            <key>Minute</key>
+            <integer>{m}</integer>
+        </dict>""")
+        intervals_xml = "\n".join(intervals)
+
         plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -378,12 +439,9 @@ def install_scheduler():
         <string>--cron</string>
     </array>
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>{hour}</integer>
-        <key>Minute</key>
-        <integer>{minute}</integer>
-    </dict>
+    <array>
+{intervals_xml}
+    </array>
     <key>StandardOutPath</key>
     <string>{LOG_FILE}</string>
     <key>StandardErrorPath</key>
@@ -397,8 +455,8 @@ def install_scheduler():
         subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
         subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
         print(f"\n[✓] macOS LaunchAgent berhasil dipasang!")
-        print(f"    ⏰ Dijadwalkan setiap jam {time_str} pagi.")
-        print(f"    ⚡ Fitur Auto-Catchup: Jika laptop tidur/mati jam {time_str}, script otomatis jalan saat dinyalakan.")
+        print(f"    ⏰ Dijadwalkan mulai jam {time_str} pagi.")
+        print(f"    ⚡ Fitur Auto-Catchup: Otomatis mengejar pengiriman saat laptop dinyalakan/dibuka kapan saja.")
 
     elif OS_NAME == "Windows":
         cmd = [
@@ -604,6 +662,11 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
 
     log_message("Memulai proses pengiriman streak harian...")
 
+    if not wait_for_internet(timeout=60, check_interval=3, verbose=verbose):
+        err = "Koneksi internet tidak tersedia saat pengiriman streak."
+        log_message(err)
+        return {"success": False, "message": err, "sent": 0, "failed": 1}
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -758,38 +821,6 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
 
 
 # ==============================================================================
-# Interactive Terminal Hub (TUI)
-# ==============================================================================
-
-def print_dashboard():
-    cfg = load_config()
-    state = load_state()
-    today_str = str(date.today())
-    has_run_today = state.get("last_success_date") == today_str
-    is_sched_active, sched_desc = get_scheduler_status()
-    is_logged_in = check_login_status()
-
-    mode_name = "🌟 Select All" if cfg.get("mode") == "all" else "👥 Groups / Labeling"
-    
-    print("\n" + "=" * 58)
-    print("⚡  TikTok Streak Auto-Saver & Helper Hub")
-    print("=" * 58)
-    print(f"👤 Akun Sesi:      {'🟢 VALID (Aktif)' if is_logged_in else '🔴 Belum Login'}")
-    print(f"📅 Status Hari Ini: {'✅ Streak Sudah Terkirim' if has_run_today else '⏳ Belum Terkirim Hari Ini'}")
-    print(f"👥 Mode Penerima:   {mode_name}")
-    print(f"⏰ Jadwal Auto:     {'🟢' if is_sched_active else '⚪'} {sched_desc}")
-    print("=" * 58)
-    print(" [1] 🚀 Kirim Streak Sekarang (Run Check-in)")
-    print(" [2] 👥 Kelola Penerima & Grup (Select All / Checklist)")
-    print(" [3] 🔍 Pindai Kontak DM dari TikTok (Auto-detect)")
-    print(" [4] ⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)")
-    print(" [5] 🔑 Login / Hubungkan Akun TikTok (Browser Window)")
-    print(" [6] 🔔 Pengaturan Notifikasi (Telegram / Discord)")
-    print(" [0] 🚪 Keluar")
-    print("=" * 58)
-
-
-# ==============================================================================
 # 100% Interactive Terminal Hub (TUI - Powered by Questionary)
 # ==============================================================================
 
@@ -811,7 +842,15 @@ def print_dashboard():
     print("⚡  TikTok Streak Auto-Saver & Helper Hub")
     print("=" * 58)
     print(f"👤 Akun Sesi:      {'🟢 VALID (Aktif)' if is_logged_in else '🔴 Belum Login'}")
-    print(f"📅 Status Hari Ini: {'✅ Streak Sudah Terkirim' if has_run_today else '⏳ Belum Terkirim Hari Ini'}")
+    if has_run_today:
+        print(f"📅 Status Hari Ini: ✅ Streak Sudah Terkirim ({state.get('sent_count', 0)} kontak)")
+    else:
+        last_attempt = state.get("last_attempt", "")
+        if last_attempt.startswith(today_str) and state.get("failed_count", 0) > 0:
+            print(f"📅 Status Hari Ini: ⚠️  Belum Terkirim ({state.get('last_summary', '')})")
+            print(f"                   ℹ️  Gagal koneksi saat bangun tidur (Wi-Fi belum tersambung).")
+        else:
+            print("📅 Status Hari Ini: ⌛ Belum Terkirim Hari Ini")
     print(f"👥 Mode Penerima:   {mode_name}")
     print(f"⏰ Jadwal Auto:     {'🟢' if is_sched_active else '⚪'} {sched_desc}")
     print("=" * 58 + "\n")
@@ -1200,8 +1239,43 @@ def interactive_hub():
 
 
 # ==============================================================================
-# CLI Entry Point
+# CLI Entry Point & Background Cron Worker
 # ==============================================================================
+
+def run_cron_job(max_retries: int = 3, retry_delay: int = 40):
+    """
+    Executes streak sending in unattended background mode with robust wake-up catch-up.
+    Waits for network connection if waking up from sleep, and retries on transient errors.
+    """
+    state = load_state()
+    today_str = str(date.today())
+    if state.get("last_success_date") == today_str:
+        log_message(f"Cron check: Streak hari ini ({today_str}) sudah terkirim sebelumnya. Selesai.")
+        return
+
+    log_message("Cron triggered: Memulai proses otomatis...")
+
+    # 1. Wait for active internet connection (crucial for macOS wake-up)
+    if not wait_for_internet(timeout=180, check_interval=3, verbose=False):
+        log_message("Cron abort: Koneksi internet belum tersedia setelah 180 detik. Menunggu jadwal berikutnya...")
+        return
+
+    # 2. Retry loop for transient failures
+    for attempt in range(1, max_retries + 1):
+        log_message(f"Menjalankan pengiriman streak (Percobaan {attempt}/{max_retries})...")
+        res = run_send_streak(force=False, verbose=False)
+        if res.get("success"):
+            log_message(f"Cron sukses pada percobaan ke-{attempt}.")
+            return
+
+        if attempt < max_retries:
+            log_message(f"Percobaan ke-{attempt} belum berhasil ({res.get('message')}). Menunggu {retry_delay} detik sebelum mencoba lagi...")
+            time.sleep(retry_delay)
+            # Re-verify internet before retry
+            wait_for_internet(timeout=60, check_interval=3, verbose=False)
+        else:
+            log_message("Cron selesai: Seluruh percobaan telah habis.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="⚡ TikTok Streak Auto-Saver & Helper Hub")
@@ -1214,12 +1288,14 @@ def main():
 
     if args.cron:
         # Background mode for LaunchAgent / TaskScheduler
-        run_send_streak(force=False, verbose=False)
+        run_cron_job()
     elif args.force:
+        wait_for_internet(timeout=15, verbose=True)
         run_send_streak(force=True, verbose=True)
     elif args.login:
         interactive_login()
     elif args.scan:
+        wait_for_internet(timeout=15, verbose=True)
         scan_dm_contacts(verbose=True)
     else:
         # Check update on startup

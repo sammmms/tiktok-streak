@@ -90,7 +90,7 @@ def check_for_updates(prompt_if_latest: bool = False):
     import urllib.request
     import json
 
-    primary_url = f"https://wsnsam.my.id/api/updates?app={APP_NAME}"
+    primary_url = f"https://script.wsnsam.my.id/api/updates?app={APP_NAME}"
     fallback_url = f"https://raw.githubusercontent.com/sammmms/{APP_NAME}/main/version.json"
 
     def fetch_remote():

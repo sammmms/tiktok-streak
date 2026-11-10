@@ -465,18 +465,12 @@ def resolve_message_for_contact(contact_name: str, group_msg: str = None) -> str
 
 
 # ==============================================================================
-# Safety, Pacing & Hours Restriction
+# Safety & Delay Helpers
 # ==============================================================================
 
 def get_message_delay() -> float:
-    cfg = load_config()
-    pace = cfg.get("safety", {}).get("pace", "normal")
-    if pace == "fast":
-        return random.uniform(1.2, 2.0)
-    elif pace == "relaxed":
-        return random.uniform(5.0, 8.0)
-    else:  # normal
-        return random.uniform(2.8, 4.5)
+    """Natural typing jitter between contacts (2.5 - 4.0s)."""
+    return random.uniform(2.5, 4.0)
 
 
 def get_click_delay() -> float:
@@ -484,25 +478,11 @@ def get_click_delay() -> float:
 
 
 def is_within_safe_hours() -> tuple:
-    """Returns (is_safe: bool, reason: str)."""
-    cfg = load_config()
-    safe_cfg = cfg.get("safety", {}).get("safe_hours", {})
-    if not safe_cfg.get("enabled", True):
-        return True, "Safe hours restriction disabled"
-
+    """Postpones midnight background runs (01:00 - 06:00) until morning."""
     now_hour = datetime.now().hour
-    start = safe_cfg.get("start", 7)
-    end = safe_cfg.get("end", 23)
-
-    if start <= end:
-        in_range = start <= now_hour < end
-    else:
-        in_range = now_hour >= start or now_hour < end
-
-    if in_range:
-        return True, "Within safe hours"
-    else:
-        return False, f"Di luar jam aman pengiriman ({start:02d}:00 - {end:02d}:00)"
+    if 1 <= now_hour < 6:
+        return False, "Di luar jam aman pengiriman (01:00 - 06:00)"
+    return True, "Within safe hours"
 
 
 def wait_for_internet(timeout: int = 180, check_interval: int = 3, verbose: bool = False) -> bool:
@@ -552,6 +532,56 @@ def wait_for_internet(timeout: int = 180, check_interval: int = 3, verbose: bool
 # Notifications (macOS Native, Telegram, Discord)
 # ==============================================================================
 
+def send_telegram_notification(bot_token: str, chat_id: str, title: str, text: str, success: bool) -> tuple:
+    """Send HTML notification via Telegram Bot API. Returns (success: bool, message: str)."""
+    try:
+        import requests
+        import html
+        icon = "✅" if success else "❌"
+        safe_title = html.escape(title)
+        safe_text = html.escape(text)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"{icon} <b>{safe_title}</b>\n\n{safe_text}\n\n<i>Waktu: {now_str}</i>"
+
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": msg,
+            "parse_mode": "HTML"
+        }, timeout=10)
+
+        data = resp.json()
+        if resp.status_code == 200 and data.get("ok"):
+            return True, "Berhasil terkirim ke Telegram!"
+        else:
+            desc = data.get("description", resp.text)
+            return False, f"Telegram API Error ({resp.status_code}): {desc}"
+    except Exception as e:
+        return False, f"Gagal koneksi Telegram: {e}"
+
+
+def send_discord_notification(webhook_url: str, title: str, text: str, success: bool) -> tuple:
+    """Send Embed notification via Discord Webhook. Returns (success: bool, message: str)."""
+    try:
+        import requests
+        color = 0x2ECC71 if success else 0xE74C3C
+        payload = {
+            "embeds": [{
+                "title": title,
+                "description": text,
+                "color": color,
+                "timestamp": datetime.utcnow().isoformat()
+            }]
+        }
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code in (200, 204):
+            return True, "Berhasil terkirim ke Discord Webhook!"
+        else:
+            return False, f"Discord Error ({resp.status_code}): {resp.text}"
+    except Exception as e:
+        return False, f"Gagal koneksi Discord: {e}"
+
+
 def send_notification(title: str, text: str, success: bool):
     cfg = load_config()
     notifs = cfg.get("notifications", {})
@@ -574,35 +604,16 @@ def send_notification(title: str, text: str, success: bool):
     # 2. Telegram Bot
     tg = notifs.get("telegram", {})
     if tg.get("enabled") and tg.get("bot_token") and tg.get("chat_id"):
-        try:
-            import requests
-            icon = "✅" if success else "❌"
-            msg = f"{icon} *{title}*\n\n{text}\n\n_Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
-            requests.post(
-                f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage",
-                json={"chat_id": tg["chat_id"], "text": msg, "parse_mode": "Markdown"},
-                timeout=10
-            )
-        except Exception as e:
-            log_message(f"Telegram notification error: {e}")
+        ok, err = send_telegram_notification(tg["bot_token"], tg["chat_id"], title, text, success)
+        if not ok:
+            log_message(f"Telegram error: {err}")
 
     # 3. Discord Webhook
     dc = notifs.get("discord", {})
     if dc.get("enabled") and dc.get("webhook_url"):
-        try:
-            import requests
-            color = 0x2ECC71 if success else 0xE74C3C
-            payload = {
-                "embeds": [{
-                    "title": title,
-                    "description": text,
-                    "color": color,
-                    "timestamp": datetime.utcnow().isoformat()
-                }]
-            }
-            requests.post(dc["webhook_url"], json=payload, timeout=10)
-        except Exception as e:
-            log_message(f"Discord notification error: {e}")
+        ok, err = send_discord_notification(dc["webhook_url"], title, text, success)
+        if not ok:
+            log_message(f"Discord error: {err}")
 
 
 # ==============================================================================
@@ -1308,21 +1319,21 @@ def menu_manage_recipients():
     while True:
         cfg = load_config()
         mode = cfg.get("mode", "all")
-        mode_label = "Select All" if mode == "all" else "Groups / Labeling"
-        default_msg = cfg.get("default_message", "🔥")
+        mode_label = "Select All (Semua Kontak)" if mode == "all" else "Groups / Labeling"
 
         choices = [
-            Choice(f"🔄 Ganti Mode (Saat ini: {mode_label})", value="toggle_mode"),
+            Choice(f"🔄 Ganti Mode Pengiriman (Saat ini: {mode_label})", value="toggle_mode"),
             Choice("📋 Checklist Kontak & Tetapkan Grup (Interactive Multi-select)", value="checklist"),
-            Choice("🏷️  Kelola Label Grup & Pesan Khusus", value="groups"),
+            Choice("🏷️  Kelola Label Grup", value="groups"),
+            Choice("💬 Konfigurasi Pesan & Variasi (Default, Pool Acak & Khusus)", value="messages"),
             Choice("🚫 Kelola Daftar Pengecualian (Blacklist / Exclude)", value="exclude"),
-            Choice(f"💬 Ubah Pesan Default (Saat ini: '{default_msg}')", value="default_msg"),
+            Choice("👁️  Pratinjau Pesan yang Akan Dikirim (Preview)", value="preview"),
             Separator(),
             Choice("🔙 Kembali ke Menu Utama", value="back")
         ]
 
         action = questionary.select(
-            f"👥 Kelola Penerima & Grup [Mode Aktif: {mode.upper()}]:",
+            f"👥 Kelola Penerima & Pesan [Mode Aktif: {mode.upper()}]:",
             choices=choices
         ).ask()
 
@@ -1341,19 +1352,14 @@ def menu_manage_recipients():
         elif action == "groups":
             menu_manage_groups()
 
+        elif action == "messages":
+            menu_manage_messages()
+
         elif action == "exclude":
             menu_manage_exclude()
 
-        elif action == "default_msg":
-            new_def = questionary.text(
-                "Masukkan pesan default baru:",
-                default=default_msg
-            ).ask()
-            if new_def:
-                cfg["default_message"] = new_def
-                save_config(cfg)
-                log_activity("CONFIG", f"Pesan default diubah menjadi: '{new_def}'")
-                print(f"\n[✓] Pesan default diperbarui menjadi: '{new_def}'\n")
+        elif action == "preview":
+            show_message_preview()
 
 
 def menu_manage_scheduler():
@@ -1408,6 +1414,169 @@ def menu_manage_scheduler():
             questionary.press_any_key_to_continue().ask()
 
 
+def show_telegram_guide():
+    print("\n" + "=" * 62)
+    print("📖 Panduan Singkat Integrasi Telegram (Cuma 1 Menit):")
+    print("=" * 62)
+    print("1. Buka aplikasi Telegram di HP / Laptop kamu.")
+    print("2. Cari @BotFather (bot resmi centang biru dari Telegram).")
+    print("3. Kirim perintah /newbot dan ikuti instruksi:")
+    print("   -> Masukkan nama tampilan bot (misal: 'Streak Helper')")
+    print("   -> Masukkan username bot (harus berakhiran 'bot', misal: 'sam_streak_bot')")
+    print("   -> BotFather akan memberikan HTTP API Token.")
+    print("4. Ambil Chat ID pribadi kamu:")
+    print("   -> Cari @userinfobot di Telegram, klik Start.")
+    print("   -> Bot tersebut langsung membalas nomor 'Id: 123456789' (Chat ID).")
+    print("5. PENTING: Buka bot buatanmu (dari langkah 3) lalu klik tombol START!")
+    print("   (Bot Telegram tidak bisa kirim pesan sebelum kamu klik Start).")
+    print("=" * 62 + "\n")
+    questionary.press_any_key_to_continue().ask()
+
+
+def menu_telegram_settings():
+    while True:
+        cfg = load_config()
+        tg = cfg.setdefault("notifications", {}).setdefault("telegram", {})
+        enabled = tg.get("enabled", False)
+        token = tg.get("bot_token", "")
+        chat_id = tg.get("chat_id", "")
+        masked_token = (token[:6] + "..." + token[-4:]) if len(token) > 10 else (token or "(Belum diisi)")
+
+        print("\n" + "=" * 58)
+        print("📱 Pengaturan Telegram Bot:")
+        print(f"   Status      : {'🟢 AKTIF' if enabled else '⚪ NONAKTIF'}")
+        print(f"   Bot Token   : {masked_token}")
+        print(f"   Chat ID     : {chat_id or '(Belum diisi)'}")
+        print("=" * 58 + "\n")
+
+        choices = [
+            Choice(f"🔄 {'Nonaktifkan' if enabled else 'Aktifkan'} Notifikasi Telegram", value="toggle"),
+            Choice("✏️  Atur / Ubah Bot Token & Chat ID", value="edit"),
+            Choice("🔔 Tes Kirim Notifikasi ke Telegram Sekarang", value="test"),
+            Choice("📖 Panduan Cara Buat Bot & Dapatkan Chat ID", value="guide"),
+            Separator(),
+            Choice("🔙 Kembali", value="back")
+        ]
+
+        action = questionary.select("Pilih Aksi Telegram:", choices=choices).ask()
+        if action == "back" or not action:
+            break
+
+        elif action == "toggle":
+            tg["enabled"] = not enabled
+            if tg["enabled"] and (not token or not chat_id):
+                print("\n[*] Lengkapi Bot Token dan Chat ID terlebih dahulu:")
+                new_token = questionary.text("Masukkan Telegram Bot Token:", default=token).ask()
+                new_id = questionary.text("Masukkan Telegram Chat ID:", default=chat_id).ask()
+                if new_token:
+                    tg["bot_token"] = new_token.strip()
+                if new_id:
+                    tg["chat_id"] = new_id.strip()
+            save_config(cfg)
+            log_activity("CONFIG", f"Telegram Bot status diubah ke: {'AKTIF' if tg['enabled'] else 'NONAKTIF'}")
+            print(f"\n[✓] Notifikasi Telegram: {'🟢 AKTIF' if tg['enabled'] else '⚪ NONAKTIF'}\n")
+
+        elif action == "edit":
+            new_token = questionary.text("Masukkan Telegram Bot Token:", default=token).ask()
+            new_id = questionary.text("Masukkan Telegram Chat ID:", default=chat_id).ask()
+            if new_token is not None:
+                tg["bot_token"] = new_token.strip()
+            if new_id is not None:
+                tg["chat_id"] = new_id.strip()
+            if tg.get("bot_token") and tg.get("chat_id"):
+                tg["enabled"] = True
+            save_config(cfg)
+            log_activity("CONFIG", "Kredensial Telegram Bot diperbarui.")
+            print("\n[✓] Konfigurasi Telegram berhasil disimpan!\n")
+
+        elif action == "test":
+            if not tg.get("bot_token") or not tg.get("chat_id"):
+                print("\n[!] Lengkapi Bot Token dan Chat ID terlebih dahulu di opsi [Edit].\n")
+            else:
+                print("\n[*] Menghubungi Telegram API...")
+                ok, msg = send_telegram_notification(
+                    tg["bot_token"],
+                    tg["chat_id"],
+                    "Tes Notifikasi TikTok Streak",
+                    "Halo! Bot TikTok Streak kamu berhasil terhubung ke Telegram 🎉\nNotifikasi streak harian akan masuk ke sini.",
+                    success=True
+                )
+                if ok:
+                    print(f"[✓] {msg}\n")
+                else:
+                    print(f"[!] {msg}")
+                    if "chat not found" in msg.lower():
+                        print("👉 Tips: Pastikan kamu sudah mencari username bot kamu di Telegram dan klik tombol 'START'!\n")
+            questionary.press_any_key_to_continue().ask()
+
+        elif action == "guide":
+            show_telegram_guide()
+
+
+def menu_discord_settings():
+    while True:
+        cfg = load_config()
+        dc = cfg.setdefault("notifications", {}).setdefault("discord", {})
+        enabled = dc.get("enabled", False)
+        webhook = dc.get("webhook_url", "")
+        masked_url = (webhook[:30] + "..." + webhook[-6:]) if len(webhook) > 40 else (webhook or "(Belum diisi)")
+
+        print("\n" + "=" * 58)
+        print("💬 Pengaturan Discord Webhook:")
+        print(f"   Status      : {'🟢 AKTIF' if enabled else '⚪ NONAKTIF'}")
+        print(f"   Webhook URL : {masked_url}")
+        print("=" * 58 + "\n")
+
+        choices = [
+            Choice(f"🔄 {'Nonaktifkan' if enabled else 'Aktifkan'} Discord Webhook", value="toggle"),
+            Choice("✏️  Atur / Ubah Discord Webhook URL", value="edit"),
+            Choice("🔔 Tes Kirim Notifikasi ke Discord Sekarang", value="test"),
+            Separator(),
+            Choice("🔙 Kembali", value="back")
+        ]
+
+        action = questionary.select("Pilih Aksi Discord:", choices=choices).ask()
+        if action == "back" or not action:
+            break
+
+        elif action == "toggle":
+            dc["enabled"] = not enabled
+            if dc["enabled"] and not webhook:
+                new_url = questionary.text("Masukkan Discord Webhook URL:").ask()
+                if new_url:
+                    dc["webhook_url"] = new_url.strip()
+            save_config(cfg)
+            log_activity("CONFIG", f"Discord Webhook diubah ke: {'AKTIF' if dc['enabled'] else 'NONAKTIF'}")
+            print(f"\n[✓] Discord Webhook: {'🟢 AKTIF' if dc['enabled'] else '⚪ NONAKTIF'}\n")
+
+        elif action == "edit":
+            new_url = questionary.text("Masukkan Discord Webhook URL:", default=webhook).ask()
+            if new_url is not None:
+                dc["webhook_url"] = new_url.strip()
+            if dc.get("webhook_url"):
+                dc["enabled"] = True
+            save_config(cfg)
+            log_activity("CONFIG", "Discord Webhook URL diperbarui.")
+            print("\n[✓] Discord Webhook berhasil disimpan!\n")
+
+        elif action == "test":
+            if not dc.get("webhook_url"):
+                print("\n[!] Masukkan Webhook URL terlebih dahulu.\n")
+            else:
+                print("\n[*] Menghubungi Discord Webhook...")
+                ok, msg = send_discord_notification(
+                    dc["webhook_url"],
+                    "Tes Notifikasi TikTok Streak",
+                    "Halo! Webhook Discord kamu berhasil terhubung ke TikTok Streak 🎉",
+                    success=True
+                )
+                if ok:
+                    print(f"[✓] {msg}\n")
+                else:
+                    print(f"[!] {msg}\n")
+            questionary.press_any_key_to_continue().ask()
+
+
 def menu_notifications():
     while True:
         cfg = load_config()
@@ -1416,9 +1585,9 @@ def menu_notifications():
         dc = notifs.get("discord", {})
 
         choices = [
-            Choice(f"📱 Telegram Bot: {'🟢 AKTIF' if tg.get('enabled') else '⚪ Nonaktif'}", value="toggle_tg"),
-            Choice(f"💬 Discord Webhook: {'🟢 AKTIF' if dc.get('enabled') else '⚪ Nonaktif'}", value="toggle_dc"),
-            Choice("🔔 Tes Kirim Notifikasi Sekarang", value="test_notif"),
+            Choice(f"📱 Telegram Bot: {'🟢 AKTIF' if tg.get('enabled') else '⚪ Nonaktif'}", value="telegram"),
+            Choice(f"💬 Discord Webhook: {'🟢 AKTIF' if dc.get('enabled') else '⚪ Nonaktif'}", value="discord"),
+            Choice("🔔 Tes Semua Notifikasi Aktif", value="test_all"),
             Separator(),
             Choice("🔙 Kembali ke Menu Utama", value="back")
         ]
@@ -1427,31 +1596,18 @@ def menu_notifications():
         if action == "back" or not action:
             break
 
-        if action == "toggle_tg":
-            tg["enabled"] = not tg.get("enabled", False)
-            if tg["enabled"] and not tg.get("bot_token"):
-                tg["bot_token"] = questionary.text("Masukkan Telegram Bot Token:").ask()
-                tg["chat_id"] = questionary.text("Masukkan Telegram Chat ID:").ask()
-            save_config(cfg)
-            print(f"\n[✓] Telegram Bot sekarang: {'AKTIF' if tg['enabled'] else 'NONAKTIF'}\n")
+        elif action == "telegram":
+            menu_telegram_settings()
 
-        elif action == "toggle_dc":
-            dc["enabled"] = not dc.get("enabled", False)
-            if dc["enabled"] and not dc.get("webhook_url"):
-                dc["webhook_url"] = questionary.text("Masukkan Discord Webhook URL:").ask()
-            save_config(cfg)
-            print(f"\n[✓] Discord Webhook sekarang: {'AKTIF' if dc['enabled'] else 'NONAKTIF'}\n")
+        elif action == "discord":
+            menu_discord_settings()
 
-        elif action == "test_notif":
-            print("\n[*] Mengirim notifikasi tes...")
+        elif action == "test_all":
+            print("\n[*] Mengirim notifikasi tes ke semua channel aktif...")
             send_notification("Tes Notifikasi TikTok Streak", "Halo! Notifikasi pengingat streak berhasil terhubung.", success=True)
-            print("[✓] Notifikasi tes dikirim!\n")
+            print("[✓] Notifikasi tes selesai dikirim!\n")
             questionary.press_any_key_to_continue().ask()
 
-
-# ==============================================================================
-# Message Configuration, Safety & Log Viewer Sub-Menus
-# ==============================================================================
 
 def menu_pool_editor():
     PRESET_TEMPLATES = [
@@ -1518,142 +1674,126 @@ def menu_pool_editor():
                 cfg["messages"]["pool"] = pool
                 save_config(cfg)
                 log_activity("CONFIG", f"Pool diperbarui dengan template preset ({len(pool)} pesan)")
-                print(f"[✓] Pool pesan diperbarui!\n")
+                print(f"[✓] Pool berhasil diperbarui ({len(pool)} variasi aktif).\n")
 
         elif act == "edit":
             if not pool:
-                print("[!] Belum ada pesan untuk diedit.")
+                print("[!] Belum ada pesan di dalam pool.\n")
                 continue
-            to_edit = questionary.select(
-                "Pilih pesan yang ingin diedit:",
-                choices=[Choice(title=p, value=idx) for idx, p in enumerate(pool)]
-            ).ask()
-            if to_edit is not None:
-                updated = questionary.text("Edit teks pesan:", default=pool[to_edit]).ask()
-                if updated and updated.strip():
-                    old_text = pool[to_edit]
-                    pool[to_edit] = updated.strip()
+            item_choices = [Choice(f"{i}. {p}", value=i-1) for i, p in enumerate(pool, 1)]
+            item_choices.append(Separator())
+            item_choices.append(Choice("🔙 Batal", value="cancel"))
+            chosen = questionary.select("Pilih pesan yang ingin diedit:", choices=item_choices).ask()
+            if chosen != "cancel" and chosen is not None:
+                old_val = pool[chosen]
+                new_val = questionary.text("Edit template pesan:", default=old_val).ask()
+                if new_val and new_val.strip():
+                    pool[chosen] = new_val.strip()
                     cfg["messages"]["pool"] = pool
                     save_config(cfg)
-                    log_activity("CONFIG", f"Pesan pool '{old_text}' diubah menjadi '{updated.strip()}'")
-                    print("[✓] Pesan berhasil diperbarui!\n")
+                    log_activity("CONFIG", f"Pesan pool diedit dari '{old_val}' -> '{new_val.strip()}'")
+                    print(f"[✓] Pesan nomor {chosen+1} berhasil diperbarui!\n")
 
         elif act == "remove":
             if not pool:
-                print("[!] Belum ada pesan untuk dihapus.")
+                print("[!] Belum ada pesan di dalam pool.\n")
                 continue
-            to_del = questionary.checkbox(
-                "Pilih pesan yang ingin dihapus:",
-                choices=[Choice(title=p, value=p) for p in pool]
-            ).ask()
-            if to_del:
-                cfg["messages"]["pool"] = [p for p in pool if p not in to_del]
+            item_choices = [Choice(f"{i}. {p}", value=p) for i, p in enumerate(pool, 1)]
+            to_remove = questionary.checkbox("Pilih pesan yang ingin dihapus:", choices=item_choices).ask()
+            if to_remove:
+                pool = [p for p in pool if p not in to_remove]
+                cfg["messages"]["pool"] = pool
                 save_config(cfg)
-                log_activity("CONFIG", f"{len(to_del)} pesan dihapus dari pool")
-                print(f"[✓] {len(to_del)} pesan berhasil dihapus dari pool!\n")
+                log_activity("CONFIG", f"Dihapus {len(to_remove)} pesan dari pool")
+                print(f"[✓] {len(to_remove)} pesan berhasil dihapus dari pool.\n")
 
 
 def menu_contact_overrides():
     while True:
         cfg = load_config()
         contacts = cfg.get("contacts", [])
-        overrides = cfg.get("messages", {}).get("contact_overrides", {})
+        overrides = cfg.get("messages", {}).get("overrides", {})
 
         print("\n" + "=" * 58)
-        print("👤 Pesan Khusus per Kontak (Contact Overrides):")
+        print("👤 Daftar Pesan Khusus per Kontak:")
         print("=" * 58)
         if not overrides:
-            print("  (Belum ada pesan khusus yang disetel untuk kontak manapun)")
+            print("  (Belum ada pesan khusus. Semua kontak memakai template default/pool)")
         else:
-            for name, msg in overrides.items():
-                print(f"  • {name:<18} -> \"{msg}\"")
+            for c_name, custom_msg in overrides.items():
+                print(f"  • {c_name:<20} -> '{custom_msg}'")
         print("=" * 58 + "\n")
 
         choices = [
-            Choice("➕ Setel / Ubah Pesan Khusus Kontak", value="set"),
-            Choice("🗑️  Hapus Pesan Khusus Kontak", value="remove"),
+            Choice("➕ Tetapkan Pesan Khusus untuk Kontak", value="add"),
+            Choice("🗑️  Hapus Pesan Khusus (Kembalikan ke Default)", value="remove"),
             Separator(),
-            Choice("🔙 Kembali", value="back")
+            Choice("🔙 Selesai / Kembali", value="back")
         ]
 
-        act = questionary.select("Kelola Pesan Khusus per Kontak:", choices=choices).ask()
+        act = questionary.select("Kelola Pesan Khusus Kontak:", choices=choices).ask()
         if act == "back" or not act:
             break
 
-        if act == "set":
+        if act == "add":
             if not contacts:
-                print("[!] Belum ada kontak terdeteksi. Silakan jalankan 'Pindai Kontak' terlebih dahulu.")
+                print("[!] Belum ada kontak terdeteksi. Silakan Pindai Kontak terlebih dahulu.\n")
                 continue
-
-            target_contact = questionary.select(
-                "Pilih kontak yang ingin diberi pesan khusus:",
-                choices=[Choice(title=f"{c} {'(Sudah ada: \"' + overrides[c] + '\")' if c in overrides else ''}", value=c) for c in contacts]
-            ).ask()
-
-            if target_contact:
-                default_val = overrides.get(target_contact, "Pagi {first_name}! Semangat harinya ❤️🔥")
-                custom_text = questionary.text(
-                    f"Pesan khusus untuk '{target_contact}':",
-                    default=default_val
+            contact_choices = [Choice(c, value=c) for c in contacts]
+            contact_choices.append(Separator())
+            contact_choices.append(Choice("🔙 Batal", value="cancel"))
+            chosen_contact = questionary.select("Pilih kontak:", choices=contact_choices).ask()
+            if chosen_contact and chosen_contact != "cancel":
+                current_custom = overrides.get(chosen_contact, "")
+                msg_input = questionary.text(
+                    f"Tulis pesan khusus untuk '{chosen_contact}':",
+                    default=current_custom or "Semangat hari ini {first_name}! Streak 🔥"
                 ).ask()
-                if custom_text and custom_text.strip():
-                    overrides[target_contact] = custom_text.strip()
-                    cfg["messages"]["contact_overrides"] = overrides
+                if msg_input and msg_input.strip():
+                    overrides[chosen_contact] = msg_input.strip()
+                    cfg["messages"]["overrides"] = overrides
                     save_config(cfg)
-                    log_activity("CONFIG", f"Pesan khusus '{target_contact}' disetel: '{custom_text.strip()}'")
-                    print(f"\n[✓] Pesan khusus untuk '{target_contact}' berhasil disimpan!\n")
+                    log_activity("CONFIG", f"Pesan khusus untuk '{chosen_contact}' diatur ke: '{msg_input.strip()}'")
+                    print(f"[✓] Pesan khusus untuk '{chosen_contact}' berhasil disimpan!\n")
 
         elif act == "remove":
             if not overrides:
-                print("[!] Belum ada pesan khusus yang disetel.")
+                print("[!] Tidak ada pesan khusus yang aktif.\n")
                 continue
-            to_remove = questionary.checkbox(
-                "Pilih kontak yang ingin dihapus pesan khususnya:",
-                choices=[Choice(title=f"{name} (Saat ini: \"{msg}\")", value=name) for name, msg in overrides.items()]
-            ).ask()
-            if to_remove:
-                for name in to_remove:
-                    overrides.pop(name, None)
-                cfg["messages"]["contact_overrides"] = overrides
+            remove_choices = [Choice(f"{c}: '{m}'", value=c) for c, m in overrides.items()]
+            chosen_to_del = questionary.checkbox("Pilih kontak untuk menghapus pesan khususnya:", choices=remove_choices).ask()
+            if chosen_to_del:
+                for c in chosen_to_del:
+                    if c in overrides:
+                        del overrides[c]
+                cfg["messages"]["overrides"] = overrides
                 save_config(cfg)
-                log_activity("CONFIG", f"Pesan khusus dihapus untuk {len(to_remove)} kontak")
-                print(f"\n[✓] Pesan khusus untuk {len(to_remove)} kontak berhasil dihapus.\n")
+                log_activity("CONFIG", f"Dihapus pesan khusus untuk {len(chosen_to_del)} kontak")
+                print(f"[✓] Pesan khusus berhasil dihapus. Kontak kembali menggunakan template umum.\n")
 
 
 def show_message_preview():
     cfg = load_config()
     contacts = cfg.get("contacts", [])
     if not contacts:
-        contacts = ["Budi Santoso", "Siti Rahma", "Kevin Wijaya", "Jessica", "Rizky"]
+        contacts = ["Budi Santoso", "Siti Aminah", "David Wijaya"]
 
-    groups = cfg.get("groups", {})
-    overrides = cfg.get("messages", {}).get("contact_overrides", {})
+    print("\n" + "=" * 65)
+    print("👁️  PRATINJAU FORMAT PESAN STREAK (PREVIEW HASIL TEKS)")
+    print("=" * 65)
+    mode = cfg.get("messages", {}).get("mode", "single")
+    print(f" Mode Aktif : {'🎲 Acak dari Pool' if mode == 'pool' else '💬 Satu Pesan Default'}")
+    print("-" * 65)
 
-    print("\n" + "=" * 62)
-    print("👁️  Pratinjau Pesan yang Akan Diterima Teman Anda Hari Ini:")
-    print("=" * 62)
-    sample_list = contacts[:6]
-    for idx, c in enumerate(sample_list, 1):
-        grp_msg = None
-        grp_name = None
-        for g_n, g_d in groups.items():
-            if c in g_d.get("members", []):
-                grp_msg = g_d.get("message")
-                grp_name = g_n
-                break
-
-        msg = resolve_message_for_contact(c, group_msg=grp_msg)
-        if c in overrides:
-            source = "Pesan Khusus"
-        elif grp_name and grp_msg != cfg.get("default_message"):
-            source = f"Grup: {grp_name}"
-        elif cfg.get("messages", {}).get("mode") == "pool":
-            source = "Pool Acak"
-        else:
-            source = "Default"
-
-        print(f" {idx:2d}. {c:<16} : \"{msg}\" [{source}]")
-    print("=" * 62 + "\n")
+    sample = contacts[:6]
+    for c in sample:
+        resolved = resolve_message_for_contact(c)
+        is_override = c in cfg.get("messages", {}).get("overrides", {})
+        badge = " [Pesan Khusus]" if is_override else ""
+        print(f"  Kepada: {c:<18}{badge}")
+        print(f"  Pesan : '{resolved}'")
+        print()
+    print("=" * 65 + "\n")
     questionary.press_any_key_to_continue().ask()
 
 
@@ -1661,44 +1801,35 @@ def menu_manage_messages():
     while True:
         cfg = load_config()
         msg_cfg = cfg.get("messages", {})
-        mode = msg_cfg.get("mode", "pool")
-        pool = msg_cfg.get("pool", [])
-        overrides = msg_cfg.get("contact_overrides", {})
-        append_emoji = msg_cfg.get("append_random_emoji", False)
+        mode = msg_cfg.get("mode", "single")
+        mode_label = "🎲 Variasi Acak (Pool)" if mode == "pool" else "💬 Satu Pesan Default"
         default_msg = cfg.get("default_message", "🔥")
-
-        mode_str = "🎲 Acak dari Daftar (Pool)" if mode == "pool" else "🔒 Pesan Tetap (Fixed)"
-        emoji_str = "🟢 Aktif" if append_emoji else "⚪ Nonaktif"
+        pool = msg_cfg.get("pool", [])
+        overrides = msg_cfg.get("overrides", {})
 
         choices = [
-            Choice(f"🔄 Mode Pesan: {mode_str}", value="toggle_mode"),
-            Choice(f"📝 Kelola Daftar Pesan Acak ({len(pool)} variasi di pool)", value="manage_pool"),
-            Choice(f"👤 Pesan Khusus per Kontak ({len(overrides)} orang disetel)", value="manage_overrides"),
+            Choice(f"🔄 Ganti Mode Pesan (Saat ini: {mode_label})", value="toggle_mode"),
             Choice(f"💬 Ubah Pesan Default (Saat ini: '{default_msg}')", value="default_msg"),
-            Choice(f"✨ Emoji Booster Acak: {emoji_str}", value="toggle_emoji"),
-            Choice("👁️  Pratinjau Pesan Hari Ini (Live Preview)", value="preview"),
+            Choice(f"🎲 Kelola Pool Variasi Acak ({len(pool)} variasi tersimpan)", value="pool"),
+            Choice(f"👤 Pesan Khusus per Kontak ({len(overrides)} kontak khusus)", value="overrides"),
+            Choice("👁️  Pratinjau Hasil Pesan (Preview)", value="preview"),
             Separator(),
-            Choice("🔙 Kembali ke Menu Utama", value="back")
+            Choice("🔙 Selesai / Kembali", value="back")
         ]
 
-        action = questionary.select("💬 Konfigurasi Pesan & Template:", choices=choices).ask()
-        if action == "back" or not action:
+        act = questionary.select("💬 Konfigurasi Format Pesan Streak:", choices=choices).ask()
+        if act == "back" or not act:
             break
 
-        if action == "toggle_mode":
-            new_mode = "fixed" if mode == "pool" else "pool"
-            cfg["messages"]["mode"] = new_mode
+        elif act == "toggle_mode":
+            new_mode = "pool" if mode == "single" else "single"
+            msg_cfg["mode"] = new_mode
+            cfg["messages"] = msg_cfg
             save_config(cfg)
             log_activity("CONFIG", f"Mode pesan diubah ke: {new_mode.upper()}")
-            print(f"\n[✓] Mode pesan diubah ke: {'Acak dari Daftar (Pool)' if new_mode == 'pool' else 'Pesan Tetap (Fixed)'}\n")
+            print(f"\n[✓] Mode pesan diubah ke: {'Variasi Acak (Pool)' if new_mode == 'pool' else 'Satu Pesan Default'}\n")
 
-        elif action == "manage_pool":
-            menu_pool_editor()
-
-        elif action == "manage_overrides":
-            menu_contact_overrides()
-
-        elif action == "default_msg":
+        elif act == "default_msg":
             new_def = questionary.text(
                 "Masukkan pesan default baru:",
                 default=default_msg
@@ -1709,205 +1840,139 @@ def menu_manage_messages():
                 log_activity("CONFIG", f"Pesan default diubah menjadi: '{new_def}'")
                 print(f"\n[✓] Pesan default diperbarui menjadi: '{new_def}'\n")
 
-        elif action == "toggle_emoji":
-            cfg["messages"]["append_random_emoji"] = not append_emoji
-            save_config(cfg)
-            status = "AKTIF" if cfg["messages"]["append_random_emoji"] else "NONAKTIF"
-            log_activity("CONFIG", f"Emoji booster diubah ke: {status}")
-            print(f"\n[✓] Emoji booster sekarang: {status}\n")
+        elif act == "pool":
+            menu_pool_editor()
 
-        elif action == "preview":
+        elif act == "overrides":
+            menu_contact_overrides()
+
+        elif act == "preview":
             show_message_preview()
 
 
-def menu_safety_settings():
+def menu_account():
     while True:
-        cfg = load_config()
-        safety = cfg.get("safety", {})
-        pace = safety.get("pace", "normal")
-        safe_hours = safety.get("safe_hours", {"enabled": True, "start": 7, "end": 23})
-        headless = cfg.get("headless", True)
-
-        pace_label = {
-            "fast": "🚀 Cepat (1-2 detik)",
-            "normal": "⚡ Normal / Natural (3-5 detik)",
-            "relaxed": "🛡️ Santai / Aman Maksimal (5-8 detik)"
-        }.get(pace, "⚡ Normal (3-5 detik)")
-
-        sh_status = f"🟢 Aktif ({safe_hours.get('start', 7):02d}:00 - {safe_hours.get('end', 23):02d}:00)" if safe_hours.get("enabled", True) else "⚪ Nonaktif"
-        hl_status = "🟢 Latar Belakang (Headless)" if headless else "🖥️ Jendela Terlihat (Visible)"
+        is_logged_in = check_login_status()
+        contacts = load_config().get("contacts", [])
+        status_label = "🟢 VALID (Aktif)" if is_logged_in else "🔴 BELUM LOGIN"
 
         choices = [
-            Choice(f"⚡ Kecepatan Pengiriman: {pace_label}", value="change_pace"),
-            Choice(f"🌙 Batas Jam Aman: {sh_status}", value="toggle_safe_hours"),
-            Choice(f"🖥️  Mode Tampilan Browser: {hl_status}", value="toggle_headless"),
+            Choice(f"🔍 Pindai Kontak DM dari TikTok (Tersimpan: {len(contacts)} kontak)", value="scan"),
+            Choice("🔑 Login / Hubungkan Akun TikTok (Buka Jendela Browser)", value="login"),
+            Choice(f"ℹ️  Cek Ulang Status Sesi Login (Status: {status_label})", value="check"),
             Separator(),
             Choice("🔙 Kembali ke Menu Utama", value="back")
         ]
 
-        action = questionary.select("⚙️  Pengaturan Kecepatan & Sistem:", choices=choices).ask()
+        action = questionary.select("🔑 Manajemen Akun & Kontak TikTok:", choices=choices).ask()
         if action == "back" or not action:
             break
 
-        if action == "change_pace":
-            new_pace = questionary.select(
-                "Pilih kecepatan jeda pengiriman antar kontak:",
-                choices=[
-                    Choice("⚡ Normal / Natural (Jeda 2.8 - 4.5 detik) [Direkomendasikan]", value="normal"),
-                    Choice("🚀 Cepat (Jeda 1.2 - 2.0 detik) [Untuk kontak sedikit]", value="fast"),
-                    Choice("🛡️ Santai / Aman Maksimal (Jeda 5.0 - 8.0 detik) [Anti-limit]", value="relaxed")
-                ]
-            ).ask()
-            if new_pace:
-                cfg["safety"]["pace"] = new_pace
-                save_config(cfg)
-                log_activity("CONFIG", f"Kecepatan pengiriman diubah ke: {new_pace.upper()}")
-                print(f"\n[✓] Kecepatan pengiriman diubah ke: {new_pace.upper()}\n")
+        elif action == "scan":
+            scan_dm_contacts(verbose=True)
+            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
 
-        elif action == "toggle_safe_hours":
-            is_enabled = safe_hours.get("enabled", True)
-            toggle_choice = questionary.select(
-                "Pengaturan Batas Jam Aman:",
-                choices=[
-                    Choice(f"{'⚪ Matikan' if is_enabled else '🟢 Aktifkan'} Batas Jam Aman", value="toggle"),
-                    Choice("🕒 Ubah Rentang Jam Aman", value="edit_hours"),
-                    Choice("🔙 Batal", value="back")
-                ]
-            ).ask()
-            if toggle_choice == "toggle":
-                safe_hours["enabled"] = not is_enabled
-                cfg["safety"]["safe_hours"] = safe_hours
-                save_config(cfg)
-                status = "AKTIF" if safe_hours["enabled"] else "NONAKTIF"
-                log_activity("CONFIG", f"Batas jam aman diubah ke: {status}")
-                print(f"\n[✓] Batas jam aman sekarang: {status}\n")
-            elif toggle_choice == "edit_hours":
-                s_str = questionary.text("Mulai jam berapa (0-23):", default=str(safe_hours.get("start", 7))).ask()
-                e_str = questionary.text("Sampai jam berapa (0-23):", default=str(safe_hours.get("end", 23))).ask()
-                try:
-                    s_int = int(s_str)
-                    e_int = int(e_str)
-                    if 0 <= s_int <= 23 and 0 <= e_int <= 23:
-                        safe_hours["start"] = s_int
-                        safe_hours["end"] = e_int
-                        safe_hours["enabled"] = True
-                        cfg["safety"]["safe_hours"] = safe_hours
-                        save_config(cfg)
-                        log_activity("CONFIG", f"Rentang jam aman diubah ke: {s_int:02d}:00 - {e_int:02d}:00")
-                        print(f"\n[✓] Jam aman diatur: {s_int:02d}:00 - {e_int:02d}:00\n")
-                    else:
-                        print("\n[!] Angka jam tidak valid.\n")
-                except ValueError:
-                    print("\n[!] Format jam salah.\n")
+        elif action == "login":
+            interactive_login()
+            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
 
-        elif action == "toggle_headless":
-            cfg["headless"] = not headless
-            save_config(cfg)
-            new_hl = cfg["headless"]
-            status_desc = "Headless (Latar Belakang)" if new_hl else "Visible (Jendela Terbuka)"
-            log_activity("CONFIG", f"Mode peramban diubah ke: {status_desc}")
-            print(f"\n[✓] Mode peramban sekarang: {status_desc}\n")
+        elif action == "check":
+            print("\n[*] Memeriksa sesi browser TikTok...")
+            ok = check_login_status()
+            print(f"[{'✓' if ok else '!'}] Status Sesi: {'🟢 VALID (Aktif)' if ok else '🔴 KADALUARSA / BELUM LOGIN'}\n")
+            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
 
 
 def display_logs(date_filter: str = None, category_filter: str = None, max_lines: int = 40):
-    if not LOG_FILE.exists():
-        print("\n[!] Berkas catatan log belum ada.\n")
+    clean_expired_logs(retention_days=3)
+    if not os.path.exists(LOG_DIR):
+        print("\n[!] Direktori log belum ditemukan.\n")
         return
 
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        print(f"[!] Gagal membaca catatan log: {e}")
+    files = sorted([f for f in os.listdir(LOG_DIR) if f.startswith("activity_") and f.endswith(".log")])
+    if not files:
+        print("\n[!] Belum ada log aktivitas tersimpan.\n")
         return
 
-    filtered = []
-    for l in lines:
-        raw = l.strip()
-        if not raw:
+    all_entries = []
+    for f in files:
+        d_str = f[len("activity_"):-len(".log")]
+        if date_filter and d_str != date_filter:
             continue
-        if date_filter and not raw.startswith(f"[{date_filter}"):
-            continue
-        if category_filter and f"[{category_filter}" not in raw:
-            continue
-        filtered.append(raw)
+        filepath = os.path.join(LOG_DIR, f)
+        try:
+            with open(filepath, "r", encoding="utf-8") as lf:
+                for line in lf:
+                    line_s = line.strip()
+                    if not line_s:
+                        continue
+                    if category_filter and f"[{category_filter}]" not in line_s:
+                        continue
+                    all_entries.append(line_s)
+        except Exception:
+            pass
 
-    print("\n" + "=" * 65)
-    title = f"📜 Riwayat Log Aktivitas"
+    print("\n" + "=" * 70)
+    filter_desc = []
     if date_filter:
-        title += f" [Tanggal: {date_filter}]"
+        filter_desc.append(f"Tanggal: {date_filter}")
     if category_filter:
-        title += f" [Kategori: {category_filter}]"
-    print(f"{title} (Menampilkan {min(len(filtered), max_lines)} dari {len(filtered)} baris):")
-    print("=" * 65)
+        filter_desc.append(f"Kategori: {category_filter}")
+    f_str = f" ({', '.join(filter_desc)})" if filter_desc else " (Semua Kategori - Max 3 Hari)"
+    print(f"📜 RIWAYAT AKTIVITAS & LOG{f_str}:")
+    print("=" * 70)
 
-    if not filtered:
-        print("  (Tidak ada catatan log yang sesuai kriteria)")
+    if not all_entries:
+        print("  (Tidak ada catatan log yang cocok dengan filter)")
     else:
-        for line in filtered[-max_lines:]:
-            if "[JOB   ]" in line or "[JOB]" in line:
-                print(f" \033[32m{line}\033[0m")
-            elif "[CONFIG]" in line:
-                print(f" \033[36m{line}\033[0m")
-            elif "[SYSTEM]" in line:
-                print(f" \033[33m{line}\033[0m")
-            elif "[ERROR ]" in line or "[ERROR]" in line:
-                print(f" \033[31m{line}\033[0m")
-            else:
-                print(f" {line}")
-    print("=" * 65 + "\n")
+        recent = all_entries[-max_lines:]
+        for entry in recent:
+            print(f"  {entry}")
+        if len(all_entries) > max_lines:
+            print(f"\n  ... dan {len(all_entries) - max_lines} entri sebelumnya.")
+
+    print("=" * 70 + "\n")
 
 
 def menu_view_logs():
     while True:
-        cfg = load_config()
-        retention = cfg.get("logging", {}).get("retention_days", 3)
-        clean_expired_logs(retention)
-
         choices = [
-            Choice("📋 Ringkasan Aktivitas Hari Ini (Pekerjaan & Konfigurasi)", value="today"),
-            Choice(f"📄 Baca Seluruh Log Aktivitas ({retention} Hari Terakhir)", value="all"),
-            Choice("🔍 Filter Log Berdasarkan Kategori (JOB / CONFIG / SYSTEM / ERROR)", value="filter"),
-            Choice(f"🧹 Bersihkan Log Kedaluwarsa Sekarang (Retensi {retention} Hari)", value="clean"),
+            Choice("📜 Lihat Semua Log (3 Hari Terakhir)", value="all"),
+            Choice("🚀 Filter Log Eksekusi Streak (JOB)", value="job"),
+            Choice("⚙️  Filter Perubahan Pengaturan (CONFIG)", value="config"),
+            Choice("🧹 Bersihkan Log Manual Sekarang", value="clean"),
             Separator(),
             Choice("🔙 Kembali ke Menu Utama", value="back")
         ]
 
-        action = questionary.select(
-            f"📜 Riwayat Aktivitas & Log (Tersimpan hingga {retention} hari):",
-            choices=choices
-        ).ask()
-
-        if action == "back" or not action:
+        act = questionary.select("📜 Riwayat Aktivitas & Log (Retensi Otomatis 3 Hari):", choices=choices).ask()
+        if act == "back" or not act:
             break
 
-        elif action == "today":
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            display_logs(date_filter=today_str)
-            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
-
-        elif action == "all":
+        if act == "all":
             display_logs()
-            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
+            questionary.press_any_key_to_continue().ask()
 
-        elif action == "filter":
-            cat = questionary.select(
-                "Pilih Kategori Log:",
-                choices=[
-                    Choice("⚡ JOB    - Pekerjaan / Pengiriman Streak", value="JOB"),
-                    Choice("⚙️  CONFIG - Perubahan Pengaturan & Konfigurasi", value="CONFIG"),
-                    Choice("🖥️  SYSTEM - Sistem, Wake-Up & Jaringan", value="SYSTEM"),
-                    Choice("❌ ERROR  - Kesalahan & Kegagalan", value="ERROR"),
-                    Choice("🔙 Kembali", value="back")
-                ]
-            ).ask()
-            if cat and cat != "back":
-                display_logs(category_filter=cat)
-                questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
+        elif act == "job":
+            display_logs(category_filter="JOB")
+            questionary.press_any_key_to_continue().ask()
 
-        elif action == "clean":
-            clean_expired_logs(retention)
-            print(f"\n[✓] Pembersihan log selesai! Seluruh log lebih dari {retention} hari telah dihapus.\n")
+        elif act == "config":
+            display_logs(category_filter="CONFIG")
+            questionary.press_any_key_to_continue().ask()
+
+        elif act == "clean":
+            confirm = questionary.confirm("Hapus semua log aktivitas yang tersimpan sekarang?").ask()
+            if confirm:
+                if os.path.exists(LOG_DIR):
+                    for f in os.listdir(LOG_DIR):
+                        if f.startswith("activity_") and f.endswith(".log"):
+                            try:
+                                os.remove(os.path.join(LOG_DIR, f))
+                            except Exception:
+                                pass
+                log_activity("SYSTEM", "Seluruh log aktivitas dibersihkan manual oleh user.")
+                print("\n[✓] Seluruh riwayat log berhasil dibersihkan!\n")
             questionary.press_any_key_to_continue().ask()
 
 
@@ -1917,13 +1982,10 @@ def interactive_hub():
 
         choices = [
             Choice("🚀 Kirim Streak Sekarang (Run Check-in)", value="run"),
-            Choice("👥 Kelola Penerima & Grup (Select All / Checklist)", value="recipients"),
-            Choice("💬 Konfigurasi Pesan & Template (Message Settings)", value="messages"),
-            Choice("⚙️  Pengaturan Kecepatan & Sistem (Safety & Browser)", value="safety"),
+            Choice("👥 Kelola Penerima & Pesan (Kontak, Grup & Variasi Pesan)", value="recipients"),
+            Choice("⏰ Jadwal Otomatis Harian (LaunchAgent @ 09:00 + Wake-up Catch-up)", value="scheduler"),
             Choice("📜 Riwayat Aktivitas & Log (Tersimpan 3 Hari)", value="logs"),
-            Choice("🔍 Pindai Kontak DM dari TikTok (Auto-detect)", value="scan"),
-            Choice("⏰ Pasang / Atur Jadwal Harian (Catch-up saat laptop nyala)", value="scheduler"),
-            Choice("🔑 Login / Hubungkan Akun TikTok (Browser Window)", value="login"),
+            Choice("🔑 Akun & Pindai Kontak (Login & Scan DM TikTok)", value="account"),
             Choice("🔔 Pengaturan Notifikasi (Telegram / Discord)", value="notifications"),
             Choice("🔄 Cek Pembaruan Aplikasi (Check for Updates)", value="check_update"),
             Separator(),
@@ -1947,25 +2009,14 @@ def interactive_hub():
         elif action == "recipients":
             menu_manage_recipients()
 
-        elif action == "messages":
-            menu_manage_messages()
-
-        elif action == "safety":
-            menu_safety_settings()
+        elif action == "scheduler":
+            menu_manage_scheduler()
 
         elif action == "logs":
             menu_view_logs()
 
-        elif action == "scan":
-            scan_dm_contacts(verbose=True)
-            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali ke menu...").ask()
-
-        elif action == "scheduler":
-            menu_manage_scheduler()
-
-        elif action == "login":
-            interactive_login()
-            questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali ke menu...").ask()
+        elif action == "account":
+            menu_account()
 
         elif action == "notifications":
             menu_notifications()
@@ -1973,10 +2024,6 @@ def interactive_hub():
         elif action == "check_update":
             check_for_updates(prompt_if_latest=True)
 
-
-# ==============================================================================
-# CLI Entry Point & Background Cron Worker
-# ==============================================================================
 
 def run_cron_job(max_retries: int = 3, retry_delay: int = 40):
     """

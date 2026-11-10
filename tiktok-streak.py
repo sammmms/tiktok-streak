@@ -46,44 +46,75 @@ def parse_semver(ver: str) -> tuple:
     return tuple(parts)
 
 
+def run_with_progress(title: str, worker_fn, timeout: float = 4.0):
+    """Executes worker_fn in a daemon thread while rendering an animated progress bar and spinner."""
+    import threading
+    res = {"done": False, "result": None, "error": None}
+
+    def target():
+        try:
+            res["result"] = worker_fn()
+        except Exception as e:
+            res["error"] = e
+        finally:
+            res["done"] = True
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    start_t = time.time()
+    i = 0
+
+    while not res["done"] and (time.time() - start_t < timeout):
+        elapsed = time.time() - start_t
+        pct = min(int((elapsed / timeout) * 100), 99)
+        filled = pct // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        sys.stdout.write(f"\r[*] {title}... {frames[i % len(frames)]} [{bar}] {pct}% ({elapsed:.1f}s)")
+        sys.stdout.flush()
+        time.sleep(0.08)
+        i += 1
+
+    sys.stdout.write("\r" + " " * 80 + "\r")
+    sys.stdout.flush()
+    return res["result"], res["error"]
+
+
 def check_for_updates(prompt_if_latest: bool = False):
     """
     Checks latest update from https://wsnsam.my.id/api/updates?app=tiktok-streak
     with fallback to raw.githubusercontent.com/.../version.json.
-    Prompts user with changelog and performs in-place in-app updates.
+    Shows animated progress bar and spinner.
     """
     import urllib.request
     import json
-    import time
-
-    sys.stdout.write("[*] Memeriksa pembaruan terbaru... ")
-    sys.stdout.flush()
 
     primary_url = f"https://wsnsam.my.id/api/updates?app={APP_NAME}"
     fallback_url = f"https://raw.githubusercontent.com/sammmms/{APP_NAME}/main/version.json"
 
-    update_data = None
-    for url in [primary_url, fallback_url]:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AutoUpdater)"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status == 200:
-                    update_data = json.loads(resp.read().decode("utf-8"))
-                    break
-        except Exception:
-            continue
+    def fetch_remote():
+        for url in [primary_url, fallback_url]:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AutoUpdater)"})
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status == 200:
+                        return json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                continue
+        return None
+
+    update_data, _ = run_with_progress("Memeriksa pembaruan terbaru", fetch_remote, timeout=3.5)
 
     if not update_data or "version" not in update_data:
-        sys.stdout.write("\r[*] Memeriksa pembaruan terbaru... [Lewati / Offline]\n")
-        sys.stdout.flush()
-        time.sleep(0.3)
+        print("[*] Memeriksa pembaruan terbaru... [Lewati / Offline]")
+        time.sleep(0.2)
         return
 
     latest_ver = update_data["version"]
     if parse_semver(latest_ver) <= parse_semver(APP_VERSION):
-        sys.stdout.write(f"\r[*] Memeriksa pembaruan terbaru... [Versi Terbaru: v{APP_VERSION} ✓]\n")
-        sys.stdout.flush()
-        time.sleep(0.4)
+        print(f"[*] Memeriksa pembaruan terbaru... [Versi Terbaru: v{APP_VERSION} ✓]")
+        time.sleep(0.3)
         if prompt_if_latest:
             print(f"\n[✓] Anda sudah menggunakan versi terbaru (v{APP_VERSION}).\n")
             import questionary
@@ -91,7 +122,7 @@ def check_for_updates(prompt_if_latest: bool = False):
         return
 
     # Newer version available
-    sys.stdout.write("\r" + " " * 60 + "\r")
+    sys.stdout.write("\r" + " " * 80 + "\r")
     sys.stdout.flush()
 
     print("\n" + "=" * 62)
@@ -502,34 +533,47 @@ def wait_for_internet(timeout: int = 180, check_interval: int = 3, verbose: bool
 
     start_time = time.time()
     last_logged = 0
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    step = 0
 
     while time.time() - start_time < timeout:
+        elapsed = time.time() - start_time
+        pct = min(int((elapsed / timeout) * 100), 99)
+        bar = "█" * (pct // 10) + "░" * (10 - (pct // 10))
+        if verbose:
+            sys.stdout.write(f"\r[*] Menunggu koneksi internet aktif... {spinner[step % len(spinner)]} [{bar}] {elapsed:.1f}s/{timeout}s")
+            sys.stdout.flush()
+            step += 1
+
         try:
             # 1. Quick socket connection to public DNS (Cloudflare / Google)
-            s = socket.create_connection(("1.1.1.1", 53), timeout=3)
+            s = socket.create_connection(("1.1.1.1", 53), timeout=2)
             s.close()
             # 2. HTTP probe to verify TLS and web routing
             req = urllib.request.Request(
                 "https://www.google.com",
                 headers={"User-Agent": "Mozilla/5.0"}
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status in (200, 204, 301, 302):
-                    elapsed = int(time.time() - start_time)
-                    if elapsed > 2:
-                        log_message(f"Koneksi internet aktif terdeteksi ({elapsed}s setelah bangun).")
-                    elif verbose:
-                        print("[✓] Koneksi internet aktif.")
+                    if verbose:
+                        sys.stdout.write(f"\r{' ' * 75}\r[✓] Koneksi internet aktif! ({elapsed:.1f}s)\n")
+                        sys.stdout.flush()
+                    elif elapsed > 2:
+                        log_message(f"Koneksi internet aktif terdeteksi ({elapsed:.1f}s setelah bangun).")
                     return True
         except Exception:
             pass
 
-        elapsed = int(time.time() - start_time)
         if elapsed >= 5 and (elapsed - last_logged >= 15):
-            log_message(f"Menunggu koneksi internet aktif ({elapsed}s/{timeout}s)...")
+            log_message(f"Menunggu koneksi internet aktif ({int(elapsed)}s/{timeout}s)...")
             last_logged = elapsed
 
         time.sleep(check_interval)
+
+    if verbose:
+        sys.stdout.write(f"\r{' ' * 75}\r[!] Gagal terhubung ke internet setelah {timeout} detik.\n")
+        sys.stdout.flush()
 
     log_message(f"Koneksi internet tidak tersedia setelah menunggu {timeout} detik.")
     return False
@@ -775,12 +819,29 @@ def remove_scheduler():
 # ==============================================================================
 
 def check_login_status() -> bool:
-    """Check if browser profile directory has cookies/storage state."""
+    """Checks if valid auth session cookies exist in user data directory (instant SQLite check)."""
     if not PROFILE_DIR.exists():
         return False
-    # Check if Default or Storage directories exist inside profile
-    storage_state = list(PROFILE_DIR.glob("**/*Cookies*")) + list(PROFILE_DIR.glob("**/*storage*"))
-    return len(storage_state) > 0
+    cookie_db = PROFILE_DIR / "Default" / "Cookies"
+    if not cookie_db.exists():
+        cookie_db = PROFILE_DIR / "Cookies"
+    if not cookie_db.exists():
+        return False
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{cookie_db}?mode=ro", uri=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM cookies WHERE host_key LIKE '%tiktok.com%' AND "
+            "(name LIKE '%session%' OR name LIKE '%sid%' OR name = 'uid_tt' OR name = 'sessionid')"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return len(rows) > 0
+    except Exception:
+        # Fallback to profile state check
+        storage_state = list(PROFILE_DIR.glob("**/*Cookies*")) + list(PROFILE_DIR.glob("**/*storage*"))
+        return len(storage_state) > 0
 
 
 def interactive_login():
@@ -1107,6 +1168,13 @@ def print_dashboard():
     has_run_today = state.get("last_success_date") == today_str
     is_sched_active, sched_desc = get_scheduler_status()
     is_logged_in = check_login_status()
+
+    if not is_logged_in:
+        print("╭" + "─" * 56 + "╮")
+        print("│  ⚠️  STATUS AKUN: BELUM LOGIN / SESI TIKTOK KOSONG      │")
+        print("│  Bot tidak dapat mengirim streak sebelum Anda login!   │")
+        print("│  👉 Pilih opsi [1] di menu untuk login via browser.    │")
+        print("╰" + "─" * 56 + "╯\n")
 
     mode_name = "🌟 Select All" if cfg.get("mode") == "all" else "👥 Groups / Labeling"
     msg_cfg = cfg.get("messages", {})
@@ -1884,8 +1952,7 @@ def menu_account():
             questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
 
         elif action == "check":
-            print("\n[*] Memeriksa sesi browser TikTok...")
-            ok = check_login_status()
+            ok, _ = run_with_progress("Memeriksa sesi login TikTok", check_login_status, timeout=2.0)
             print(f"[{'✓' if ok else '!'}] Status Sesi: {'🟢 VALID (Aktif)' if ok else '🔴 KADALUARSA / BELUM LOGIN'}\n")
             questionary.press_any_key_to_continue("Tekan tombol apa saja untuk kembali...").ask()
 
@@ -1986,18 +2053,30 @@ def menu_view_logs():
 def interactive_hub():
     while True:
         print_dashboard()
+        is_logged_in = check_login_status()
 
-        choices = [
-            Choice("🚀 Kirim Streak Sekarang (Run Check-in)", value="run"),
+        choices = []
+        if not is_logged_in:
+            choices.append(Choice("🔑 [WAJIB] LOGIN / HUBUNGKAN AKUN TIKTOK SEKARANG", value="account"))
+            choices.append(Choice("🚀 Kirim Streak Sekarang (Run Check-in) [Butuh Login]", value="run"))
+        else:
+            choices.append(Choice("🚀 Kirim Streak Sekarang (Run Check-in)", value="run"))
+
+        choices.extend([
             Choice("👥 Kelola Penerima & Pesan (Kontak, Grup & Variasi Pesan)", value="recipients"),
             Choice("⏰ Jadwal Otomatis Harian (LaunchAgent @ 09:00 + Wake-up Catch-up)", value="scheduler"),
             Choice("📜 Riwayat Aktivitas & Log (Tersimpan 3 Hari)", value="logs"),
-            Choice("🔑 Akun & Pindai Kontak (Login & Scan DM TikTok)", value="account"),
+        ])
+
+        if is_logged_in:
+            choices.append(Choice("🔑 Akun & Pindai Kontak (Login & Scan DM TikTok)", value="account"))
+
+        choices.extend([
             Choice("🔔 Pengaturan Notifikasi (Telegram / Discord)", value="notifications"),
             Choice("🔄 Cek Pembaruan Aplikasi (Check for Updates)", value="check_update"),
             Separator(),
             Choice("🚪 Keluar", value="exit")
-        ]
+        ])
 
         action = questionary.select(
             "Pilih Menu:",

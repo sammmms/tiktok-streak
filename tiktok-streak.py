@@ -844,6 +844,26 @@ def check_login_status() -> bool:
         return len(storage_state) > 0
 
 
+def launch_browser_context(p, headless: bool = True):
+    """
+    Launches Playwright persistent context with fallback to Google Chrome
+    if the bundled Playwright chromium binary is missing or incompatible.
+    """
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    opts = {
+        "user_data_dir": str(PROFILE_DIR),
+        "headless": headless,
+        "viewport": {"width": 1280, "height": 800},
+        "args": ["--disable-blink-features=AutomationControlled"]
+    }
+    try:
+        return p.chromium.launch_persistent_context(**opts)
+    except Exception as e:
+        log_message(f"Chromium default launch gagal ({e}). Fallback ke Google Chrome lokal...")
+        opts["channel"] = "chrome"
+        return p.chromium.launch_persistent_context(**opts)
+
+
 def interactive_login():
     """Opens a visible browser window for the user to log in."""
     print("\n" + "=" * 58)
@@ -862,12 +882,7 @@ def interactive_login():
         return
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=False,
-            viewport={"width": 1280, "height": 800},
-            args=["--disable-blink-features=AutomationControlled"]
-        )
+        context = launch_browser_context(p, headless=False)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("https://www.tiktok.com/login", wait_until="networkidle")
 
@@ -878,7 +893,7 @@ def interactive_login():
 
 
 def scan_dm_contacts(verbose: bool = True) -> list:
-    """Scans and updates contact list from TikTok Web DM."""
+    """Scans and updates contact list from TikTok Web DM with list scrolling."""
     if verbose:
         print("\n[*] Menghubungkan ke TikTok untuk memindai daftar kontak DM...")
 
@@ -893,15 +908,10 @@ def scan_dm_contacts(verbose: bool = True) -> list:
 
     with sync_playwright() as p:
         try:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE_DIR),
-                headless=True,
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled"]
-            )
+            context = launch_browser_context(p, headless=True)
             page = context.pages[0] if context.pages else context.new_page()
             page.goto("https://www.tiktok.com/messages", wait_until="networkidle", timeout=60000)
-            time.sleep(5)
+            time.sleep(4)
 
             if "login" in page.url:
                 if verbose:
@@ -909,22 +919,26 @@ def scan_dm_contacts(verbose: bool = True) -> list:
                 context.close()
                 return []
 
-            items = page.locator('[data-e2e="dm-new-conversation-item"]')
-            if items.count() == 0:
-                items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
-            count = items.count()
+            for _ in range(8):
+                items = page.locator('[data-e2e="dm-new-conversation-item"]')
+                if items.count() == 0:
+                    items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+                count = items.count()
 
-            for i in range(count):
-                it = items.nth(i)
-                nick_el = it.locator('[data-e2e="dm-new-conversation-nickname"]')
-                if nick_el.count() > 0:
-                    name = nick_el.inner_text().strip()
-                else:
-                    lines = [l.strip() for l in it.inner_text().splitlines() if l.strip()]
-                    name = lines[0] if lines else ""
+                for i in range(count):
+                    it = items.nth(i)
+                    nick_el = it.locator('[data-e2e="dm-new-conversation-nickname"]')
+                    if nick_el.count() > 0:
+                        name = nick_el.inner_text().strip()
+                    else:
+                        lines = [l.strip() for l in it.inner_text().splitlines() if l.strip()]
+                        name = lines[0] if lines else ""
 
-                if name and name not in detected_contacts:
-                    detected_contacts.append(name)
+                    if name and name not in detected_contacts:
+                        detected_contacts.append(name)
+
+                page.mouse.wheel(0, 450)
+                time.sleep(0.3)
 
             context.close()
         except Exception as e:
@@ -947,8 +961,18 @@ def scan_dm_contacts(verbose: bool = True) -> list:
     return detected_contacts
 
 
-def send_message_in_chat(page, message: str) -> bool:
+def send_message_in_chat(page, message: str, expected_target: str = None) -> bool:
     try:
+        # If expected_target is provided, verify active chat header before typing
+        if expected_target:
+            header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
+            if header_nick.count() > 0:
+                active_name = header_nick.first.inner_text().strip().lower()
+                target_clean = expected_target.strip().lower()
+                if active_name != target_clean:
+                    log_message(f"VERIFIKASI GAGAL: Chat aktif '{active_name}' != target '{target_clean}'. Batal kirim demi keamanan.")
+                    return False
+
         chatbox = page.locator('[data-e2e="dm-new-chatbox"]')
         if chatbox.count() > 0:
             box = chatbox.locator('div[contenteditable="true"]').first
@@ -967,6 +991,75 @@ def send_message_in_chat(page, message: str) -> bool:
     except Exception as e:
         log_message(f"Gagal mengirim pesan di chat: {e}")
         return False
+
+
+def reset_conversation_list_scroll(page):
+    """Resets the scroll position of the conversation sidebar to the top."""
+    try:
+        first_item = page.locator('[data-e2e="dm-new-conversation-item"]').first
+        if first_item.count() > 0:
+            parent = first_item.locator('xpath=../..')
+            parent.evaluate('e => { e.scrollTop = 0; }')
+            time.sleep(0.4)
+    except Exception:
+        pass
+
+
+def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) -> bool:
+    """
+    Reliably selects and opens a DM conversation by scrolling the sidebar,
+    clicking the nickname element directly, and verifying that the chat is active.
+    """
+    target_clean = target_name.strip().lower()
+
+    # Search in two passes: 1) from current position down; 2) from top down if needed
+    for phase in range(2):
+        for scroll_idx in range(max_scroll_attempts):
+            items = page.locator('[data-e2e="dm-new-conversation-item"]')
+            count = items.count()
+
+            for i in range(count):
+                item = items.nth(i)
+                nick_el = item.locator('[data-e2e="dm-new-conversation-nickname"]')
+                if nick_el.count() == 0:
+                    continue
+
+                current_nick = nick_el.inner_text().strip()
+                if current_nick.lower() == target_clean:
+                    nick_el.scroll_into_view_if_needed()
+                    time.sleep(0.3)
+
+                    # Click nickname directly to trigger React router/state change
+                    nick_el.click()
+                    time.sleep(1.0)
+
+                    # Verify active selection
+                    is_selected = item.get_attribute("aria-selected") == "true"
+                    chat_header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
+                    header_matches = False
+                    if chat_header_nick.count() > 0:
+                        header_text = chat_header_nick.first.inner_text().strip().lower()
+                        if header_text == target_clean:
+                            header_matches = True
+
+                    if is_selected or header_matches:
+                        return True
+
+                    # Fallback click on outer item
+                    item.click()
+                    time.sleep(1.0)
+                    if item.get_attribute("aria-selected") == "true":
+                        return True
+
+            # Scroll down to reveal more virtualized conversation items
+            page.mouse.wheel(0, 400)
+            time.sleep(0.4)
+
+        if phase == 0:
+            reset_conversation_list_scroll(page)
+            time.sleep(0.5)
+
+    return False
 
 
 def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
@@ -1003,12 +1096,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
 
     with sync_playwright() as p:
         try:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE_DIR),
-                headless=cfg.get("headless", True),
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled"]
-            )
+            context = launch_browser_context(p, headless=cfg.get("headless", True))
             page = context.pages[0] if context.pages else context.new_page()
             page.goto("https://www.tiktok.com/messages", wait_until="networkidle", timeout=60000)
             time.sleep(5)
@@ -1046,9 +1134,14 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                     final_msg = resolve_message_for_contact(name, group_msg=msg_to_send)
                     if verbose:
                         print(f"  [>] Mengirim streak ke {name} ('{final_msg}')...")
-                    item.click()
+
+                    if nick_el.count() > 0:
+                        nick_el.click()
+                    else:
+                        item.click()
                     time.sleep(get_click_delay())
-                    if send_message_in_chat(page, final_msg):
+
+                    if send_message_in_chat(page, final_msg, expected_target=name):
                         success_list.append(name)
                         log_activity("JOB", f"Streak terkirim ke '{name}' -> '{final_msg}'")
                         if verbose:
@@ -1082,44 +1175,24 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                     if verbose:
                         print(f"  [>] Mencari kontak '{target_name}' (Pesan: '{final_msg}')...")
 
-                    # Search by nickname or text in conversation item
-                    target_locator = page.locator(f'[data-e2e="dm-new-conversation-item"]:has([data-e2e="dm-new-conversation-nickname"]:text-is("{target_name}"))')
-                    if target_locator.count() == 0:
-                        target_locator = page.locator(f'[data-e2e="dm-new-conversation-item"]:has-text("{target_name}"), div[data-e2e="chat-list-item"]:has-text("{target_name}")')
-
-                    found = False
-                    if target_locator.count() > 0:
-                        target_locator.first.click()
-                        found = True
-                    else:
-                        # Try search box
-                        search_box = page.locator('input[placeholder*="Search"], input[type="search"]')
-                        if search_box.count() > 0:
-                            search_box.first.fill(target_name)
-                            time.sleep(2)
-                            result = page.locator(f'[data-e2e="dm-new-conversation-item"]:has-text("{target_name}"), li:has-text("{target_name}")')
-                            if result.count() > 0:
-                                result.first.click()
-                                found = True
-                            search_box.first.fill("")
-
+                    found = select_and_open_chat(page, target_name)
                     if found:
                         time.sleep(get_click_delay())
-                        if send_message_in_chat(page, final_msg):
+                        if send_message_in_chat(page, final_msg, expected_target=target_name):
                             success_list.append(f"{target_name} ('{final_msg}')")
                             log_activity("JOB", f"Streak terkirim ke '{target_name}' -> '{final_msg}'")
                             if verbose:
                                 print(f"      [✓] Terkirim ({final_msg})!")
                         else:
                             fail_list.append(target_name)
-                            log_activity("ERROR", f"Gagal kirim pesan ke '{target_name}'")
+                            log_activity("ERROR", f"Gagal verifikasi/kirim pesan ke '{target_name}'")
                             if verbose:
-                                print(f"      [x] Gagal kirim pesan.")
+                                print(f"      [x] Gagal verifikasi atau kirim pesan.")
                     else:
-                        fail_list.append(f"{target_name} (Tidak ditemukan)")
-                        log_activity("ERROR", f"Kontak '{target_name}' tidak ditemukan di chat DM")
+                        fail_list.append(f"{target_name} (Tidak ditemukan / gagal buka chat)")
+                        log_activity("ERROR", f"Kontak '{target_name}' tidak ditemukan atau gagal dibuka di chat DM")
                         if verbose:
-                            print(f"      [x] Kontak '{target_name}' tidak ditemukan.")
+                            print(f"      [x] Kontak '{target_name}' tidak ditemukan / gagal buka chat.")
                     time.sleep(get_message_delay())
 
             context.close()

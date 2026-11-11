@@ -35,12 +35,14 @@ mkdir -p "$SHARED_HUB"
 if [ ! -d "$VENV_DIR" ]; then
     echo "📦 Membuat shared virtual environment di $VENV_DIR..."
     python3 -m venv "$VENV_DIR"
-    echo "⬇️  Memasang pustaka pendukung (Playwright, Requests, Questionary, Pillow)..."
-    "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
-    "$VENV_DIR/bin/pip" install playwright requests questionary pillow >/dev/null 2>&1 || true
-    echo "🌐 Mengunduh browser Chromium untuk Playwright..."
-    "$VENV_DIR/bin/playwright" install chromium >/dev/null 2>&1 || true
 fi
+
+echo "⬇️  Memastikan pustaka pendukung terpasang (Playwright, Requests, Questionary, Pillow)..."
+"$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
+"$VENV_DIR/bin/pip" install -q playwright requests questionary pillow >/dev/null 2>&1 || true
+
+echo "🌐 Memastikan browser Chromium Playwright tersedia..."
+"$VENV_DIR/bin/playwright" install chromium >/dev/null 2>&1 || true
 
 # Link to app dir for backward compatibility
 ln -sfn "$VENV_DIR" "$INSTALL_DIR/venv"

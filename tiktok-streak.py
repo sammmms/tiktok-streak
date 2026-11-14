@@ -22,7 +22,7 @@ from pathlib import Path
 
 OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
 APP_NAME = "tiktok-streak"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 HOME_DIR = Path.home()
 INSTALL_DIR = HOME_DIR / ".tiktok-streak"
 CONFIG_FILE = INSTALL_DIR / "config.json"
@@ -602,12 +602,12 @@ DEFAULT_CONFIG = {
     "groups": {
         "Sahabat": {
             "enabled": True,
-            "message": "Pagi bro! Streak 🔥⚡",
+            "message": "🔥",
             "members": []
         },
         "Prioritas": {
             "enabled": True,
-            "message": "Semangat harinya ya ❤️🔥",
+            "message": "🔥",
             "members": []
         },
         "Mutual": {
@@ -2106,16 +2106,27 @@ def show_message_preview():
     print("\n" + "=" * 65)
     print(t("preview_title"))
     print("=" * 65)
-    mode = cfg.get("messages", {}).get("mode", "single")
-    mode_text = t("dash_msg_mode_pool") if mode == "pool" else t("dash_msg_mode_fixed", msg=cfg.get('default_message', '🔥'))
+    recip_mode = cfg.get("mode", "all")
+    msg_mode = cfg.get("messages", {}).get("mode", "single")
+    mode_text = t("dash_msg_mode_pool") if msg_mode == "pool" else t("dash_msg_mode_fixed", msg=cfg.get('default_message', '🔥'))
     print(t("preview_mode", mode=mode_text))
+    recip_label = ("Select All (All Contacts)" if recip_mode == "all" else "Groups / Labeling") if CURRENT_LANG == "en" else ("Select All (Semua Kontak)" if recip_mode == "all" else "Groups / Labeling")
+    print(f"Recipient Mode: {recip_label}" if CURRENT_LANG == "en" else f"Mode Penerima : {recip_label}")
     print("-" * 65)
 
     sample = contacts[:6]
     for c in sample:
-        resolved = resolve_message_for_contact(c)
+        group_msg = None
+        group_name = None
+        if recip_mode == "groups":
+            for g_name, g_info in cfg.get("groups", {}).items():
+                if g_info.get("enabled", True) and c in g_info.get("members", []):
+                    group_msg = g_info.get("message")
+                    group_name = g_name
+                    break
+        resolved = resolve_message_for_contact(c, group_msg=group_msg)
         is_override = c in cfg.get("messages", {}).get("contact_overrides", {})
-        badge = " [Custom]" if is_override else ""
+        badge = " [Custom Contact]" if is_override else (f" [Group: {group_name}]" if group_name else "")
         print(t("preview_to", name=f"{c:<18}", badge=badge))
         print(t("preview_msg", msg=resolved))
         print()
@@ -2155,6 +2166,14 @@ def menu_manage_messages():
             new_def = questionary.text("Enter new default message:" if CURRENT_LANG == "en" else "Masukkan pesan default baru:", default=default_msg).ask()
             if new_def:
                 cfg["default_message"] = new_def
+                if cfg.get("groups"):
+                    sync_groups = questionary.confirm(
+                        "Also apply new message to all existing groups?" if CURRENT_LANG == "en" else "Terapkan juga pesan baru ini ke semua grup yang ada?",
+                        default=True
+                    ).ask()
+                    if sync_groups:
+                        for g in cfg.get("groups", {}).values():
+                            g["message"] = new_def
                 save_config(cfg)
                 print("\n[✓] Default message updated!\n")
         elif act == "pool":

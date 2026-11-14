@@ -1,13 +1,12 @@
 {
   "app": "tiktok-streak",
   "name": "TikTok Streak Auto-Saver & Helper Hub",
-  "version": "1.4.0",
-  "release_date": "2026-11-13",
+  "version": "1.4.1",
+  "release_date": "2026-11-14",
   "changelog": [
-    "🌐 Bilingual Internationalization: Full support for English (default) & Bahasa Indonesia",
-    "🔄 Interactive language switcher and '--lang' CLI argument support",
-    "💬 Dynamic message formatting based on selected language (greetings, days, dates)",
-    "⏰ Multi-interval wake-up catch-up on macOS LaunchAgent"
+    "💬 Accurate message preview reflecting group overrides in Groups mode",
+    "🔄 Auto-sync option to propagate default message updates to all existing groups",
+    "🛡️ Group message defaults aligned with global default message"
   ],
   "download_url": "https://raw.githubusercontent.com/sammmms/tiktok-streak/main/tiktok-streak.py"
 }

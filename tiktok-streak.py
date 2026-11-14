@@ -22,7 +22,7 @@ from pathlib import Path
 
 OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
 APP_NAME = "tiktok-streak"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 HOME_DIR = Path.home()
 INSTALL_DIR = HOME_DIR / ".tiktok-streak"
 CONFIG_FILE = INSTALL_DIR / "config.json"
@@ -1222,16 +1222,45 @@ def scan_dm_contacts(verbose: bool = True) -> list:
 
     return detected_contacts
 
+def normalize_target_name(name: str) -> str:
+    """Normalize names for comparison: lowercase, whitespace collapsed, and emoji stripped."""
+    if not name:
+        return ""
+    cleaned = re.sub(r'[^\w\s]', '', name)
+    return " ".join(cleaned.lower().split())
+
+def match_target_names(name1: str, name2: str) -> bool:
+    """Check if two names match either exactly or after emoji/whitespace normalization."""
+    if not name1 or not name2:
+        return False
+    n1_raw = name1.strip().lower()
+    n2_raw = name2.strip().lower()
+    if n1_raw == n2_raw:
+        return True
+    n1_clean = normalize_target_name(name1)
+    n2_clean = normalize_target_name(name2)
+    if n1_clean and n2_clean and (n1_clean == n2_clean or n1_clean in n2_clean or n2_clean in n1_clean):
+        return True
+    return False
+
 def send_message_in_chat(page, message: str, expected_target: str = None) -> bool:
     try:
         if expected_target:
             header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
-            if header_nick.count() > 0:
-                active_name = header_nick.first.inner_text().strip().lower()
-                target_clean = expected_target.strip().lower()
-                if active_name != target_clean:
-                    log_message(t("streak_verif_fail", active=active_name, target=target_clean))
-                    return False
+            matched = False
+            active_name = ""
+            # Wait up to 5 seconds (10 x 0.5s) for the chat pane to switch to expected_target
+            for _ in range(10):
+                if header_nick.count() > 0:
+                    active_name = header_nick.first.inner_text().strip()
+                    if match_target_names(active_name, expected_target):
+                        matched = True
+                        break
+                time.sleep(0.5)
+
+            if not matched and active_name:
+                log_message(t("streak_verif_fail", active=active_name.lower(), target=expected_target.lower()))
+                return False
 
         chatbox = page.locator('[data-e2e="dm-new-chatbox"]')
         if chatbox.count() > 0:
@@ -1262,8 +1291,6 @@ def reset_conversation_list_scroll(page):
         pass
 
 def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) -> bool:
-    target_clean = target_name.strip().lower()
-
     for phase in range(2):
         for scroll_idx in range(max_scroll_attempts):
             items = page.locator('[data-e2e="dm-new-conversation-item"]')
@@ -1276,27 +1303,30 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
                     continue
 
                 current_nick = nick_el.inner_text().strip()
-                if current_nick.lower() == target_clean:
+                if match_target_names(current_nick, target_name):
                     nick_el.scroll_into_view_if_needed()
                     time.sleep(0.3)
                     nick_el.click()
-                    time.sleep(1.0)
 
-                    is_selected = item.get_attribute("aria-selected") == "true"
+                    # Wait up to 3.5 seconds for chat header to match target
                     chat_header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
-                    header_matches = False
-                    if chat_header_nick.count() > 0:
-                        header_text = chat_header_nick.first.inner_text().strip().lower()
-                        if header_text == target_clean:
-                            header_matches = True
+                    for _ in range(7):
+                        time.sleep(0.5)
+                        if chat_header_nick.count() > 0:
+                            header_text = chat_header_nick.first.inner_text().strip()
+                            if match_target_names(header_text, target_name):
+                                return True
 
-                    if is_selected or header_matches:
-                        return True
-
+                    # Fallback click on parent item
                     item.click()
-                    time.sleep(1.0)
-                    if item.get_attribute("aria-selected") == "true":
-                        return True
+                    for _ in range(5):
+                        time.sleep(0.4)
+                        if chat_header_nick.count() > 0:
+                            header_text = chat_header_nick.first.inner_text().strip()
+                            if match_target_names(header_text, target_name):
+                                return True
+                        if item.get_attribute("aria-selected") == "true":
+                            return True
 
             page.mouse.wheel(0, 400)
             time.sleep(0.4)

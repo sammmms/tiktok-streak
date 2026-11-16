@@ -1176,6 +1176,7 @@ def scan_dm_contacts(verbose: bool = True) -> list:
 
     cfg = load_config()
     detected_contacts = []
+    usernames = cfg.setdefault("usernames", {})
 
     with sync_playwright() as p:
         try:
@@ -1189,6 +1190,29 @@ def scan_dm_contacts(verbose: bool = True) -> list:
                     print(t("scan_expired"))
                 context.close()
                 return []
+
+            # Harvest any profile links already rendered on the page
+            try:
+                page_map = page.evaluate("""() => {
+                    const map = {};
+                    const anchors = document.querySelectorAll('a[href*="/@"]');
+                    for (let a of anchors) {
+                        let href = a.getAttribute("href") || "";
+                        let m = href.match(/\\/@([a-zA-Z0-9_.-]+)/);
+                        if (m) {
+                            let u = m[1];
+                            let text = a.innerText.trim();
+                            if (text && text.length > 0 && text.length < 35 && !text.includes("\\n")) {
+                                map[text] = u;
+                            }
+                        }
+                    }
+                    return map;
+                }""")
+                if page_map and isinstance(page_map, dict):
+                    usernames.update(page_map)
+            except Exception:
+                pass
 
             for _ in range(8):
                 items = page.locator('[data-e2e="dm-new-conversation-item"]')
@@ -1207,6 +1231,24 @@ def scan_dm_contacts(verbose: bool = True) -> list:
 
                     if name and name not in detected_contacts:
                         detected_contacts.append(name)
+                        if name not in usernames:
+                            try:
+                                it.click()
+                                time.sleep(0.3)
+                                uname = page.evaluate("""() => {
+                                    const u = document.querySelector('[data-e2e="chat-uniqueid"]');
+                                    if (u && u.innerText) return u.innerText.replace(/^@/, "").trim();
+                                    const a = document.querySelector('a[href*="/@"][data-discover]');
+                                    if (a) {
+                                        const m = a.getAttribute("href").match(/\\/@([a-zA-Z0-9_.-]+)/);
+                                        if (m) return m[1];
+                                    }
+                                    return null;
+                                }""")
+                                if uname:
+                                    usernames[name] = uname
+                            except Exception:
+                                pass
 
                 page.mouse.wheel(0, 450)
                 time.sleep(0.3)
@@ -1218,12 +1260,15 @@ def scan_dm_contacts(verbose: bool = True) -> list:
 
     if detected_contacts:
         cfg["contacts"] = detected_contacts
+        cfg["usernames"] = usernames
         save_config(cfg)
         if verbose:
             print(t("scan_found", count=len(detected_contacts)))
             print("-" * 50)
             for idx, name in enumerate(detected_contacts, 1):
-                print(f" {idx:2d}. {name}")
+                u = usernames.get(name)
+                label = f"{name} (@{u})" if u and u.lower() != name.lower() else (f"@{u}" if u else name)
+                print(f" {idx:2d}. {label}")
             print("-" * 50)
     else:
         if verbose:
@@ -1255,11 +1300,19 @@ def match_target_names(name1: str, name2: str) -> bool:
 def send_message_in_chat(page, message: str, expected_target: str = None) -> bool:
     try:
         if expected_target:
+            cfg = load_config()
+            expected_uname = cfg.get("usernames", {}).get(expected_target, "").lower().lstrip("@")
             header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
+            header_uniqueid = page.locator('[data-e2e="chat-uniqueid"]')
             matched = False
             active_name = ""
             # Wait up to 5 seconds (10 x 0.5s) for the chat pane to switch to expected_target
             for _ in range(10):
+                if expected_uname and header_uniqueid.count() > 0:
+                    uid = header_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                    if uid == expected_uname:
+                        matched = True
+                        break
                 if header_nick.count() > 0:
                     active_name = header_nick.first.inner_text().strip()
                     if match_target_names(active_name, expected_target):
@@ -1300,6 +1353,9 @@ def reset_conversation_list_scroll(page):
         pass
 
 def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) -> bool:
+    cfg = load_config()
+    expected_uname = cfg.get("usernames", {}).get(target_name, "").lower().lstrip("@")
+
     for phase in range(2):
         for scroll_idx in range(max_scroll_attempts):
             items = page.locator('[data-e2e="dm-new-conversation-item"]')
@@ -1312,15 +1368,24 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
                     continue
 
                 current_nick = nick_el.inner_text().strip()
-                if match_target_names(current_nick, target_name):
+                matches = match_target_names(current_nick, target_name)
+                if not matches and expected_uname:
+                    matches = (cfg.get("usernames", {}).get(current_nick, "").lower().lstrip("@") == expected_uname)
+
+                if matches:
                     nick_el.scroll_into_view_if_needed()
                     time.sleep(0.3)
                     nick_el.click()
 
                     # Wait up to 3.5 seconds for chat header to match target
                     chat_header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
+                    chat_uniqueid = page.locator('[data-e2e="chat-uniqueid"]')
                     for _ in range(7):
                         time.sleep(0.5)
+                        if expected_uname and chat_uniqueid.count() > 0:
+                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                            if uid == expected_uname:
+                                return True
                         if chat_header_nick.count() > 0:
                             header_text = chat_header_nick.first.inner_text().strip()
                             if match_target_names(header_text, target_name):
@@ -1330,6 +1395,10 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
                     item.click()
                     for _ in range(5):
                         time.sleep(0.4)
+                        if expected_uname and chat_uniqueid.count() > 0:
+                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                            if uid == expected_uname:
+                                return True
                         if chat_header_nick.count() > 0:
                             header_text = chat_header_nick.first.inner_text().strip()
                             if match_target_names(header_text, target_name):
@@ -1519,12 +1588,22 @@ def menu_manage_recipients():
         cfg = load_config()
         contacts = cfg.get("contacts", [])
         active_recipients = get_active_recipients(cfg)
+        usernames = cfg.get("usernames", {})
+
+        def format_recipient_label(name):
+            u = usernames.get(name)
+            if u and u.lower() != name.lower():
+                return f"{name} (@{u})"
+            elif u:
+                return f"@{u}"
+            return name
 
         choices = [
             Choice(
                 f"☑️  Select Recipients ({len(active_recipients)} of {len(contacts)} active)" if CURRENT_LANG == "en" else f"☑️  Pilih Penerima ({len(active_recipients)} dari {len(contacts)} aktif)",
                 value="checklist"
             ),
+            Choice("✏️  Edit / Set Contact Username" if CURRENT_LANG == "en" else "✏️  Atur / Ubah Username Kontak", value="edit_username"),
             Choice("💬 Edit Default Streak Message" if CURRENT_LANG == "en" else "💬 Ubah Pesan Default Streak", value="message"),
             Choice("👁️  Preview Recipient List" if CURRENT_LANG == "en" else "👁️  Lihat Daftar Penerima", value="preview"),
             Separator(),
@@ -1545,7 +1624,7 @@ def menu_manage_recipients():
                 continue
 
             choices_c = [
-                Choice(title=c, value=c, checked=(c in active_recipients))
+                Choice(title=format_recipient_label(c), value=c, checked=(c in active_recipients))
                 for c in contacts
             ]
 
@@ -1563,6 +1642,35 @@ def menu_manage_recipients():
                 print(f"\n[✓] Saved! {len(selected)} of {len(contacts)} contacts selected to receive streaks.\n" if CURRENT_LANG == "en" else f"\n[✓] Tersimpan! {len(selected)} dari {len(contacts)} kontak dipilih menerima streak.\n")
                 questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
+        elif action == "edit_username":
+            if not contacts:
+                print("\n[!] No contacts saved.\n" if CURRENT_LANG == "en" else "\n[!] Belum ada kontak tersimpan.\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
+                continue
+            contact_choices = [
+                Choice(title=format_recipient_label(c), value=c)
+                for c in contacts
+            ] + [Separator(), Choice(t("recip_back"), value="back")]
+            chosen = questionary.select(
+                "Select contact to set/edit username:" if CURRENT_LANG == "en" else "Pilih kontak untuk atur/ubah username:",
+                choices=contact_choices
+            ).ask()
+            if chosen and chosen != "back":
+                current_u = usernames.get(chosen, "")
+                new_u = questionary.text(
+                    f"Username for '{chosen}':" if CURRENT_LANG == "en" else f"Username untuk '{chosen}':",
+                    default=current_u
+                ).ask()
+                if new_u is not None:
+                    new_u = new_u.strip().lstrip("@")
+                    if new_u:
+                        cfg.setdefault("usernames", {})[chosen] = new_u
+                    elif chosen in cfg.get("usernames", {}):
+                        del cfg["usernames"][chosen]
+                    save_config(cfg)
+                    print("\n[✓] Username updated!\n" if CURRENT_LANG == "en" else "\n[✓] Username berhasil diperbarui!\n")
+                    questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
         elif action == "message":
             curr_def = cfg.get("default_message", "🔥")
             new_def = questionary.text("Default Streak Message:" if CURRENT_LANG == "en" else "Pesan Default Streak:", default=curr_def).ask()
@@ -1572,13 +1680,14 @@ def menu_manage_recipients():
                 print("\n[✓] Saved!\n")
 
         elif action == "preview":
-            print("\n" + "=" * 55)
+            print("\n" + "=" * 58)
             print("📋 ACTIVE RECIPIENTS (Will receive streak 🔥):" if CURRENT_LANG == "en" else "📋 PENERIMA AKTIF (Menerima streak 🔥):")
-            print("=" * 55)
+            print("=" * 58)
             for idx, c in enumerate(contacts, 1):
                 status = "✅ YES" if c in active_recipients else "❌ SKIP"
-                print(f" {idx:2d}. {c:<30} [{status}]")
-            print("=" * 55 + "\n")
+                disp = format_recipient_label(c)
+                print(f" {idx:2d}. {disp:<36} [{status}]")
+            print("=" * 58 + "\n")
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
 def menu_manage_scheduler():

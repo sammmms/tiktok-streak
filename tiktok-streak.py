@@ -17,12 +17,13 @@ import platform
 import argparse
 import subprocess
 import signal
+import re
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
 OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
 APP_NAME = "tiktok-streak"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 HOME_DIR = Path.home()
 INSTALL_DIR = HOME_DIR / ".tiktok-streak"
 CONFIG_FILE = INSTALL_DIR / "config.json"
@@ -687,7 +688,7 @@ def load_state() -> dict:
         "last_summary": "Never run"
     }
 
-def save_state(success: bool, sent_count: int, failed_count: int, summary: str):
+def save_state(success: bool, sent_count: int, failed_count: int, summary: str, session_expired: bool = None):
     state = load_state()
     today_str = str(date.today())
     state["last_attempt"] = datetime.now().isoformat()
@@ -696,6 +697,9 @@ def save_state(success: bool, sent_count: int, failed_count: int, summary: str):
     state["last_summary"] = summary
     if success:
         state["last_success_date"] = today_str
+        state["session_expired"] = False
+    elif session_expired is not None:
+        state["session_expired"] = session_expired
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
@@ -1153,6 +1157,11 @@ def interactive_login():
         input(t("login_wait_confirm"))
         context.close()
 
+    st = load_state()
+    st["session_expired"] = False
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(st, f, indent=2, ensure_ascii=False)
+
     print(t("login_saved"))
 
 def scan_dm_contacts(verbose: bool = True) -> list:
@@ -1367,6 +1376,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
 
     success_list = []
     fail_list = []
+    is_auth_error = False
 
     with sync_playwright() as p:
         try:
@@ -1376,6 +1386,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
             time.sleep(5)
 
             if "login" in page.url:
+                is_auth_error = True
                 raise Exception("Session expired. Please log in again via Account menu.")
 
             # MODE A: SELECT ALL
@@ -1471,12 +1482,15 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
 
             context.close()
         except Exception as e:
-            fail_list.append(f"System Error: {str(e)}")
+            err_text = str(e)
+            if "Session expired" in err_text:
+                is_auth_error = True
+            fail_list.append(f"System Error: {err_text}")
             log_message(f"Error during streak run: {e}")
 
     overall_success = len(success_list) > 0 and len(fail_list) == 0
     summary = f"Sent: {len(success_list)}, Failed: {len(fail_list)}"
-    save_state(overall_success, len(success_list), len(fail_list), summary)
+    save_state(overall_success, len(success_list), len(fail_list), summary, session_expired=True if is_auth_error else None)
 
     report = f"{t('streak_report_title')}\n"
     if success_list:
@@ -1495,7 +1509,8 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
         "success": overall_success,
         "message": summary,
         "sent": len(success_list),
-        "failed": len(fail_list)
+        "failed": len(fail_list),
+        "is_auth_error": is_auth_error
     }
 
 # ==============================================================================
@@ -2395,11 +2410,15 @@ def interactive_hub():
         elif action == "language":
             menu_language()
 
-def run_cron_job(max_retries: int = 3, retry_delay: int = 40):
+def run_cron_job(max_retries: int = 1, retry_delay: int = 40):
     state = load_state()
     today_str = str(date.today())
     if state.get("last_success_date") == today_str:
         log_activity("SYSTEM", t("cron_already_sent", date=today_str))
+        return
+
+    if state.get("session_expired"):
+        log_activity("SYSTEM", "Cron skipped: TikTok login session expired. Please log in via Account menu.")
         return
 
     is_safe, reason = is_within_safe_hours()
@@ -2418,6 +2437,10 @@ def run_cron_job(max_retries: int = 3, retry_delay: int = 40):
         res = run_send_streak(force=False, verbose=False)
         if res.get("success"):
             log_activity("SYSTEM", t("cron_success", attempt=attempt))
+            return
+
+        if res.get("is_auth_error") or "session expired" in str(res.get("message", "")).lower():
+            log_activity("SYSTEM", "Cron aborted: Login required. Will not retry until logged in.")
             return
 
         if attempt < max_retries:

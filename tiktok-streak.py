@@ -110,6 +110,7 @@ TRANSLATIONS = {
         "menu_opt_run_need_login": "🚀 Send Streak Now (Run Check-in) [Login Required]",
         "menu_opt_run": "🚀 Send Streak Now (Run Check-in)",
         "menu_opt_recipients": "👥 Manage Recipients & Messages (Contacts, Groups & Variations)",
+        "menu_opt_speed": "⚡ Dispatch Speed & Safety (Pace & Browser Mode)",
         "menu_opt_scheduler": "⏰ Daily Auto Schedule (LaunchAgent @ {time} + Wake-up Catch-up)",
         "menu_opt_logs": "📜 Activity History & Logs (Last 3 Days)",
         "menu_opt_account": "🔑 Account & Scan Contacts (Login & Scan DM)",
@@ -293,6 +294,7 @@ TRANSLATIONS = {
         "menu_opt_run_need_login": "🚀 Kirim Streak Sekarang (Run Check-in) [Butuh Login]",
         "menu_opt_run": "🚀 Kirim Streak Sekarang (Run Check-in)",
         "menu_opt_recipients": "👥 Kelola Penerima & Pesan (Kontak, Grup & Variasi Pesan)",
+        "menu_opt_speed": "⚡ Pengaturan Kecepatan & Keamanan (Pace & Mode Browser)",
         "menu_opt_scheduler": "⏰ Jadwal Otomatis Harian (LaunchAgent @ {time} + Wake-up Catch-up)",
         "menu_opt_logs": "📜 Riwayat Aktivitas & Log (Tersimpan 3 Hari)",
         "menu_opt_account": "🔑 Akun & Pindai Kontak (Login & Scan DM TikTok)",
@@ -835,17 +837,45 @@ def resolve_message_for_contact(contact_name: str, group_msg: str = None) -> str
 # ==============================================================================
 
 def get_message_delay() -> float:
-    return random.uniform(2.5, 4.0)
+    cfg = load_config()
+    pace = cfg.get("safety", {}).get("pace", "normal")
+    if pace == "fast":
+        return random.uniform(1.2, 2.2)
+    elif pace == "relaxed":
+        return random.uniform(5.0, 8.0)
+    else:  # normal
+        return random.uniform(2.8, 4.5)
 
 def get_click_delay() -> float:
-    return random.uniform(1.5, 2.5)
+    cfg = load_config()
+    pace = cfg.get("safety", {}).get("pace", "normal")
+    if pace == "fast":
+        return random.uniform(0.8, 1.4)
+    elif pace == "relaxed":
+        return random.uniform(2.5, 4.0)
+    else:  # normal
+        return random.uniform(1.5, 2.5)
 
 def is_within_safe_hours() -> tuple:
+    cfg = load_config()
+    safe_cfg = cfg.get("safety", {}).get("safe_hours", {})
+    if not safe_cfg.get("enabled", True):
+        return True, "Safe hours restriction disabled"
+
     now_hour = datetime.now().hour
-    if 1 <= now_hour < 6:
-        reason = "Outside safe dispatch hours (01:00 - 06:00)" if CURRENT_LANG == "en" else "Di luar jam aman pengiriman (01:00 - 06:00)"
+    start = safe_cfg.get("start", 7)
+    end = safe_cfg.get("end", 23)
+
+    if start <= end:
+        in_range = start <= now_hour < end
+    else:
+        in_range = now_hour >= start or now_hour < end
+
+    if in_range:
+        return True, "Within safe hours"
+    else:
+        reason = f"Outside safe dispatch hours ({start:02d}:00 - {end:02d}:00)" if CURRENT_LANG == "en" else f"Di luar jam aman pengiriman ({start:02d}:00 - {end:02d}:00)"
         return False, reason
-    return True, "Within safe hours"
 
 def wait_for_internet(timeout: int = 180, check_interval: int = 3, verbose: bool = False) -> bool:
     import socket
@@ -1603,6 +1633,7 @@ def menu_manage_recipients():
                 f"☑️  Select Recipients ({len(active_recipients)} of {len(contacts)} active)" if CURRENT_LANG == "en" else f"☑️  Pilih Penerima ({len(active_recipients)} dari {len(contacts)} aktif)",
                 value="checklist"
             ),
+            Choice("⚡ Set Dispatch Speed (Pace)" if CURRENT_LANG == "en" else "⚡ Atur Kecepatan Pengiriman Pesan", value="speed"),
             Choice("✏️  Edit / Set Contact Username" if CURRENT_LANG == "en" else "✏️  Atur / Ubah Username Kontak", value="edit_username"),
             Choice("💬 Edit Default Streak Message" if CURRENT_LANG == "en" else "💬 Ubah Pesan Default Streak", value="message"),
             Choice("👁️  Preview Recipient List" if CURRENT_LANG == "en" else "👁️  Lihat Daftar Penerima", value="preview"),
@@ -1617,6 +1648,8 @@ def menu_manage_recipients():
 
         if action in ("back", None):
             break
+        elif action == "speed":
+            menu_safety_settings()
         elif action == "checklist":
             if not contacts:
                 print("\n[!] No contacts saved. Please scan contacts in Account menu first.\n" if CURRENT_LANG == "en" else "\n[!] Belum ada kontak yang tersimpan. Silakan pilih 'Pindai Kontak' di Menu Akun terlebih dahulu.\n")
@@ -1688,6 +1721,97 @@ def menu_manage_recipients():
                 disp = format_recipient_label(c)
                 print(f" {idx:2d}. {disp:<36} [{status}]")
             print("=" * 58 + "\n")
+            questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+def menu_safety_settings():
+    while True:
+        cfg = load_config()
+        safety = cfg.setdefault("safety", {})
+        pace = safety.get("pace", "normal")
+        safe_hours = safety.get("safe_hours", {"enabled": True, "start": 7, "end": 23})
+        headless = cfg.get("headless", True)
+
+        pace_label = {
+            "fast": "🚀 Fast (1.2 - 2.2s)" if CURRENT_LANG == "en" else "🚀 Cepat (1.2 - 2.2 detik)",
+            "normal": "⚡ Normal / Natural (2.8 - 4.5s)" if CURRENT_LANG == "en" else "⚡ Normal / Natural (2.8 - 4.5 detik)",
+            "relaxed": "🛡️ Relaxed / Anti-Limit (5.0 - 8.0s)" if CURRENT_LANG == "en" else "🛡️ Santai / Anti-Limit (5.0 - 8.0 detik)"
+        }.get(pace, "⚡ Normal (2.8 - 4.5s)")
+
+        sh_status = (f"🟢 Active ({safe_hours.get('start', 7):02d}:00 - {safe_hours.get('end', 23):02d}:00)" if CURRENT_LANG == "en" else f"🟢 Aktif ({safe_hours.get('start', 7):02d}:00 - {safe_hours.get('end', 23):02d}:00)") if safe_hours.get("enabled", True) else ("⚪ Disabled" if CURRENT_LANG == "en" else "⚪ Nonaktif")
+        hl_status = ("🟢 Background (Headless)" if CURRENT_LANG == "en" else "🟢 Latar Belakang (Headless)") if headless else ("🖥️ Visible Window" if CURRENT_LANG == "en" else "🖥️ Jendela Terlihat")
+
+        choices = [
+            Choice(f"⚡ {'Dispatch Speed / Pace:' if CURRENT_LANG == 'en' else 'Kecepatan Pengiriman:'} {pace_label}", value="change_pace"),
+            Choice(f"🌙 {'Safe Dispatch Hours:' if CURRENT_LANG == 'en' else 'Batas Jam Aman:'} {sh_status}", value="toggle_safe_hours"),
+            Choice(f"🖥️  {'Browser Window Mode:' if CURRENT_LANG == 'en' else 'Mode Jendela Browser:'} {hl_status}", value="toggle_headless"),
+            Separator(),
+            Choice(t("recip_back"), value="back")
+        ]
+
+        action = questionary.select(
+            "⚙️  Dispatch Speed & Safety Settings:" if CURRENT_LANG == "en" else "⚙️  Pengaturan Kecepatan & Keamanan Pengiriman:",
+            choices=choices
+        ).ask()
+
+        if action in ("back", None):
+            break
+
+        if action == "change_pace":
+            new_pace = questionary.select(
+                "Select message dispatch speed / delay between contacts:" if CURRENT_LANG == "en" else "Pilih kecepatan jeda pengiriman pesan antar kontak:",
+                choices=[
+                    Choice("⚡ Normal / Natural (2.8 - 4.5s) [Recommended]" if CURRENT_LANG == "en" else "⚡ Normal / Natural (Jeda 2.8 - 4.5 detik) [Direkomendasikan]", value="normal"),
+                    Choice("🚀 Fast (1.2 - 2.2s) [Faster dispatch]" if CURRENT_LANG == "en" else "🚀 Cepat (Jeda 1.2 - 2.2 detik) [Pengiriman lebih cepat]", value="fast"),
+                    Choice("🛡️ Relaxed (5.0 - 8.0s) [Maximum safety / anti-limit]" if CURRENT_LANG == "en" else "🛡️ Santai (Jeda 5.0 - 8.0 detik) [Aman maksimal anti-limit]", value="relaxed")
+                ]
+            ).ask()
+            if new_pace:
+                cfg.setdefault("safety", {})["pace"] = new_pace
+                save_config(cfg)
+                log_activity("CONFIG", f"Dispatch speed updated to: {new_pace.upper()}")
+                print(f"\n[✓] {'Dispatch speed updated to:' if CURRENT_LANG == 'en' else 'Kecepatan pengiriman diubah ke:'} {new_pace.upper()}\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+        elif action == "toggle_safe_hours":
+            is_enabled = safe_hours.get("enabled", True)
+            toggle_choice = questionary.select(
+                "Safe Hours Settings:" if CURRENT_LANG == "en" else "Pengaturan Batas Jam Aman:",
+                choices=[
+                    Choice(f"{'⚪ Disable' if is_enabled else '🟢 Enable'} Safe Hours" if CURRENT_LANG == "en" else f"{'⚪ Matikan' if is_enabled else '🟢 Aktifkan'} Batas Jam Aman", value="toggle"),
+                    Choice("🕒 Change Safe Hours Range" if CURRENT_LANG == "en" else "🕒 Ubah Rentang Jam Aman", value="edit_hours"),
+                    Choice("🔙 Cancel" if CURRENT_LANG == "en" else "🔙 Batal", value="back")
+                ]
+            ).ask()
+            if toggle_choice == "toggle":
+                safe_hours["enabled"] = not is_enabled
+                cfg.setdefault("safety", {})["safe_hours"] = safe_hours
+                save_config(cfg)
+                status = "ENABLED" if safe_hours["enabled"] else "DISABLED"
+                log_activity("CONFIG", f"Safe hours changed to: {status}")
+                print(f"\n[✓] Safe hours: {status}\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
+            elif toggle_choice == "edit_hours":
+                s_str = questionary.text("Start hour (0-23):" if CURRENT_LANG == "en" else "Mulai jam berapa (0-23):", default=str(safe_hours.get("start", 7))).ask()
+                e_str = questionary.text("End hour (0-23):" if CURRENT_LANG == "en" else "Sampai jam berapa (0-23):", default=str(safe_hours.get("end", 23))).ask()
+                try:
+                    s_int = int(s_str)
+                    e_int = int(e_str)
+                    if 0 <= s_int <= 23 and 0 <= e_int <= 23:
+                        safe_hours["start"] = s_int
+                        safe_hours["end"] = e_int
+                        cfg.setdefault("safety", {})["safe_hours"] = safe_hours
+                        save_config(cfg)
+                        print(f"\n[✓] Safe hours range updated: {s_int:02d}:00 - {e_int:02d}:00\n")
+                        questionary.press_any_key_to_continue(t("press_key_return")).ask()
+                except ValueError:
+                    print("\n[!] Invalid hour format.\n")
+
+        elif action == "toggle_headless":
+            cfg["headless"] = not headless
+            save_config(cfg)
+            status = "HEADLESS (Background)" if cfg["headless"] else "VISIBLE WINDOW"
+            log_activity("CONFIG", f"Browser mode changed to: {status}")
+            print(f"\n[✓] Browser display mode: {status}\n")
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
 def menu_manage_scheduler():
@@ -2279,6 +2403,7 @@ def interactive_hub():
 
         choices.extend([
             Choice(t("menu_opt_recipients"), value="recipients"),
+            Choice(t("menu_opt_speed"), value="safety"),
             Choice(t("menu_opt_scheduler", time=time_str), value="scheduler"),
             Choice(t("menu_opt_logs"), value="logs"),
         ])
@@ -2308,6 +2433,8 @@ def interactive_hub():
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
         elif action == "recipients":
             menu_manage_recipients()
+        elif action == "safety":
+            menu_safety_settings()
         elif action == "scheduler":
             menu_manage_scheduler()
         elif action == "logs":

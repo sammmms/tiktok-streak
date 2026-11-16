@@ -23,7 +23,7 @@ from pathlib import Path
 
 OS_NAME = platform.system()  # 'Darwin' (macOS), 'Windows', 'Linux'
 APP_NAME = "tiktok-streak"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 HOME_DIR = Path.home()
 INSTALL_DIR = HOME_DIR / ".tiktok-streak"
 CONFIG_FILE = INSTALL_DIR / "config.json"
@@ -1346,6 +1346,18 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
 
     return False
 
+def get_active_recipients(cfg) -> list:
+    contacts = cfg.get("contacts", [])
+    if "recipients" in cfg:
+        return [c for c in contacts if c in cfg["recipients"]]
+    if cfg.get("mode") == "groups":
+        group_members = set()
+        for g in cfg.get("groups", {}).values():
+            group_members.update(g.get("members", []))
+        return [c for c in contacts if c in group_members]
+    excludes = [x.lower() for x in cfg.get("select_all", {}).get("exclude", [])]
+    return [c for c in contacts if c.lower() not in excludes]
+
 def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
     state = load_state()
     today_str = str(date.today())
@@ -1357,7 +1369,6 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
         return {"success": True, "message": msg, "sent": state.get("sent_count", 0)}
 
     cfg = load_config()
-    mode = cfg.get("mode", "all")
     default_msg = cfg.get("default_message", "🔥")
 
     log_message(t("streak_starting"))
@@ -1389,96 +1400,38 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                 is_auth_error = True
                 raise Exception("Session expired. Please log in again via Account menu.")
 
-            # MODE A: SELECT ALL
-            if mode == "all":
-                select_all_cfg = cfg.get("select_all", {})
-                msg_to_send = select_all_cfg.get("message", default_msg)
-                exclude_list = [x.lower() for x in select_all_cfg.get("exclude", [])]
+            target_recipients = get_active_recipients(cfg)
+            if not target_recipients:
+                err = "No recipients selected. Please configure recipients in Manage Recipients menu." if CURRENT_LANG == "en" else "Tidak ada penerima yang dipilih. Silakan atur di menu Kelola Penerima."
+                raise Exception(err)
 
-                chat_items = page.locator('[data-e2e="dm-new-conversation-item"]')
-                if chat_items.count() == 0:
-                    chat_items = page.locator('div[data-e2e="chat-list-item"], li[class*="chat-item"]')
+            if verbose:
+                print(f"[*] Dispatching streaks to {len(target_recipients)} active recipients...")
 
-                total = chat_items.count()
+            for target_name in target_recipients:
+                final_msg = resolve_message_for_contact(target_name, group_msg=default_msg)
                 if verbose:
-                    print(t("streak_select_all_checking", total=total))
+                    print(t("streak_finding_contact", name=target_name, msg=final_msg))
 
-                for i in range(total):
-                    item = chat_items.nth(i)
-                    nick_el = item.locator('[data-e2e="dm-new-conversation-nickname"]')
-                    if nick_el.count() > 0:
-                        name = nick_el.inner_text().strip()
-                    else:
-                        name = item.inner_text().split("\n")[0].strip()
-
-                    if not name or name.lower() in exclude_list:
-                        if verbose and name:
-                            print(t("streak_skip_blacklist", name=name))
-                        continue
-
-                    final_msg = resolve_message_for_contact(name, group_msg=msg_to_send)
-                    if verbose:
-                        print(t("streak_sending_to", name=name, msg=final_msg))
-
-                    if nick_el.count() > 0:
-                        nick_el.click()
-                    else:
-                        item.click()
+                found = select_and_open_chat(page, target_name)
+                if found:
                     time.sleep(get_click_delay())
-
-                    if send_message_in_chat(page, final_msg, expected_target=name):
-                        success_list.append(name)
-                        log_activity("JOB", f"Streak sent to '{name}' -> '{final_msg}'")
+                    if send_message_in_chat(page, final_msg, expected_target=target_name):
+                        success_list.append(f"{target_name} ('{final_msg}')")
+                        log_activity("JOB", f"Streak sent to '{target_name}' -> '{final_msg}'")
                         if verbose:
-                            print(t("streak_sent_ok"))
+                            print(f"      [✓] Sent ({final_msg})!")
                     else:
-                        fail_list.append(name)
-                        log_activity("ERROR", f"Failed to send message to '{name}'")
+                        fail_list.append(target_name)
+                        log_activity("ERROR", f"Failed to verify/send to '{target_name}'")
                         if verbose:
-                            print(t("streak_send_fail"))
-                    time.sleep(get_message_delay())
-
-            # MODE B: GROUPS / LABELING
-            else:
-                groups = cfg.get("groups", {})
-                recipients = {}
-                for g_name, g_info in groups.items():
-                    if not g_info.get("enabled", True):
-                        continue
-                    g_msg = g_info.get("message", default_msg)
-                    for member in g_info.get("members", []):
-                        recipients[member] = g_msg
-
-                if not recipients:
-                    raise Exception(t("streak_groups_empty"))
-
-                if verbose:
-                    print(t("streak_groups_processing", count=len(recipients)))
-
-                for target_name, custom_msg in recipients.items():
-                    final_msg = resolve_message_for_contact(target_name, group_msg=custom_msg)
+                            print(f"      [x] Failed to send message.")
+                else:
+                    fail_list.append(f"{target_name} (Not found)")
+                    log_activity("ERROR", f"Contact '{target_name}' not found in DM")
                     if verbose:
-                        print(t("streak_finding_contact", name=target_name, msg=final_msg))
-
-                    found = select_and_open_chat(page, target_name)
-                    if found:
-                        time.sleep(get_click_delay())
-                        if send_message_in_chat(page, final_msg, expected_target=target_name):
-                            success_list.append(f"{target_name} ('{final_msg}')")
-                            log_activity("JOB", f"Streak sent to '{target_name}' -> '{final_msg}'")
-                            if verbose:
-                                print(f"      [✓] Sent ({final_msg})!")
-                        else:
-                            fail_list.append(target_name)
-                            log_activity("ERROR", f"Failed to verify/send to '{target_name}'")
-                            if verbose:
-                                print(f"      [x] Failed to send message.")
-                    else:
-                        fail_list.append(f"{target_name} (Not found)")
-                        log_activity("ERROR", f"Contact '{target_name}' not found in DM")
-                        if verbose:
-                            print(t("streak_contact_not_found", name=target_name))
-                    time.sleep(get_message_delay())
+                        print(t("streak_contact_not_found", name=target_name))
+                time.sleep(get_message_delay())
 
             context.close()
         except Exception as e:
@@ -1535,7 +1488,8 @@ def print_dashboard():
         print(f"│  {t('dash_warn_unauthed_desc2'):<52} │")
         print("╰" + "─" * 56 + "╯\n")
 
-    mode_name = t("dash_mode_all") if cfg.get("mode") == "all" else t("dash_mode_groups")
+    contacts = cfg.get("contacts", [])
+    active_recips = get_active_recipients(cfg)
     msg_cfg = cfg.get("messages", {})
     msg_mode = t("dash_msg_mode_pool") if msg_cfg.get("mode", "pool") == "pool" else t("dash_msg_mode_fixed", msg=cfg.get('default_message', '🔥'))
     pace_name = cfg.get("safety", {}).get("pace", "normal").capitalize()
@@ -1554,230 +1508,78 @@ def print_dashboard():
             print(t("dash_today_failed_hint"))
         else:
             print(f"{t('dash_today_status')}{t('dash_today_pending')}")
-    print(f"{t('dash_recipient_mode')}{mode_name}")
+    print(f"{t('dash_recipient_mode')}{len(active_recips)} active / {len(contacts)} total (Checklist)")
     print(f"{t('dash_config')}{msg_mode} | ⚡ Pace: {pace_name}")
     print(f"{t('dash_sched')}{'🟢' if is_sched_active else '⚪'} {sched_desc}")
     print(t("dash_logs", days=retention))
     print("=" * 58 + "\n")
 
-def interactive_manage_contacts():
-    cfg = load_config()
-    contacts = cfg.get("contacts", [])
-    if not contacts:
-        print("\n[!] No contacts saved. Please scan contacts in Account menu first.\n" if CURRENT_LANG == "en" else "\n[!] Belum ada kontak yang tersimpan. Silakan pilih 'Pindai Kontak' di Menu Utama terlebih dahulu.\n")
-        questionary.press_any_key_to_continue(t("press_key_return")).ask()
-        return
-
-    groups = cfg.get("groups", {})
-    choices = []
-    for c in contacts:
-        assigned = [g for g, d in groups.items() if c in d.get("members", [])]
-        status_str = f"Group: {', '.join(assigned)}" if assigned else ("No group" if CURRENT_LANG == "en" else "Belum ada grup")
-        is_checked = len(assigned) > 0
-        choices.append(Choice(title=f"{c:<22} ({status_str})", value=c, checked=is_checked))
-
-    print("\n💡 Tips:")
-    if CURRENT_LANG == "en":
-        print(" • [↑ / ↓] Arrow keys to navigate")
-        print(" • [Space] to select / deselect")
-        print(" • [a] to Select All / Invert")
-        print(" • [Enter] to confirm selection\n")
-        prompt_txt = "Select contacts to manage:"
-        instr = "(Space: toggle, a: select all, Enter: confirm)"
-    else:
-        print(" • [↑ / ↓] Panah keyboard untuk navigasi")
-        print(" • [Spasi] untuk centang / batalkan centang")
-        print(" • [a] untuk Pilih Semua (Select All) / Batal Semua")
-        print(" • [Enter] untuk konfirmasi pilihan Anda\n")
-        prompt_txt = "Pilih kontak-kontak yang ingin diatur:"
-        instr = "(Spasi: pilih, a: select all, Enter: konfirmasi)"
-
-    selected_contacts = questionary.checkbox(prompt_txt, choices=choices, instruction=instr).ask()
-    if not selected_contacts:
-        print("\n[*] No contacts selected. Cancelled.\n" if CURRENT_LANG == "en" else "\n[*] Tidak ada kontak yang dipilih. Dibatalkan.\n")
-        return
-
-    grp_names = list(groups.keys())
-    action_choices = [
-        Choice(f"📁 Add to group '{g_n}'", value=g_n) for g_n in grp_names
-    ] + [
-        Separator(),
-        Choice("➕ Create New Group" if CURRENT_LANG == "en" else "➕ Buat Grup Baru", value="__CREATE_GROUP__"),
-        Choice("🗑️  Remove from All Groups (Reset)" if CURRENT_LANG == "en" else "🗑️  Hapus dari Semua Grup (Reset)", value="__RESET__"),
-        Choice("🔙 Cancel" if CURRENT_LANG == "en" else "🔙 Batal", value="__CANCEL__")
-    ]
-
-    chosen_action = questionary.select(
-        f"Choose action for {len(selected_contacts)} contact(s):" if CURRENT_LANG == "en" else f"\nPilih tindakan untuk {len(selected_contacts)} kontak ini:",
-        choices=action_choices
-    ).ask()
-
-    if chosen_action in ("__CANCEL__", None):
-        return
-
-    if chosen_action == "__CREATE_GROUP__":
-        new_g = questionary.text("Enter new group name:" if CURRENT_LANG == "en" else "Masukkan nama grup baru:").ask()
-        if not new_g or not new_g.strip():
-            return
-        new_g = new_g.strip()
-        new_msg = questionary.text(f"Streak message for group '{new_g}':" if CURRENT_LANG == "en" else f"Pesan streak untuk grup '{new_g}':", default="🔥").ask() or "🔥"
-        groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
-        chosen_action = new_g
-
-    if chosen_action == "__RESET__":
-        for g_n in groups:
-            groups[g_n]["members"] = [m for m in groups[g_n].get("members", []) if m not in selected_contacts]
-        print(f"\n[✓] {len(selected_contacts)} contacts removed from all groups.\n" if CURRENT_LANG == "en" else f"\n[✓] {len(selected_contacts)} kontak berhasil dihapus dari semua grup.\n")
-    else:
-        target_members = groups[chosen_action].setdefault("members", [])
-        for sc in selected_contacts:
-            if sc not in target_members:
-                target_members.append(sc)
-        print(f"\n[✓] Successfully added {len(selected_contacts)} contact(s) to group '{chosen_action}'!\n" if CURRENT_LANG == "en" else f"\n[✓] Berhasil memasukkan {len(selected_contacts)} kontak ke grup '{chosen_action}'!\n")
-
-    save_config(cfg)
-    questionary.press_any_key_to_continue(t("press_key_continue")).ask()
-
-def menu_manage_groups():
-    while True:
-        cfg = load_config()
-        groups = cfg.get("groups", {})
-
-        print("\n" + "-" * 55)
-        print(t("groups_title"))
-        print("-" * 55)
-        for g_name, g_info in groups.items():
-            members_str = ", ".join(g_info.get("members", [])) or ("No members yet" if CURRENT_LANG == "en" else "Belum ada anggota")
-            print(f" • {g_name} ({len(g_info.get('members', []))} members):")
-            print(f"   Message : \"{g_info.get('message')}\"")
-            print(f"   Members : {members_str}")
-        print("-" * 55 + "\n")
-
-        choices = [
-            Choice(t("groups_opt_add"), value="add"),
-            Choice(t("groups_opt_edit"), value="edit_msg"),
-            Choice(t("groups_opt_delete"), value="delete"),
-            Separator(),
-            Choice(t("groups_opt_back"), value="back")
-        ]
-
-        action = questionary.select("Manage Groups:" if CURRENT_LANG == "en" else "Kelola Grup:", choices=choices).ask()
-        if action in ("back", None):
-            break
-
-        if action == "add":
-            new_g = questionary.text("New group name:" if CURRENT_LANG == "en" else "Nama grup baru:").ask()
-            if new_g and new_g.strip():
-                new_g = new_g.strip()
-                new_msg = questionary.text(f"Message for group '{new_g}':" if CURRENT_LANG == "en" else f"Pesan untuk grup '{new_g}':", default="🔥").ask() or "🔥"
-                groups[new_g] = {"enabled": True, "message": new_msg, "members": []}
-                save_config(cfg)
-                print(f"[✓] Group '{new_g}' created successfully!\n" if CURRENT_LANG == "en" else f"[✓] Grup '{new_g}' berhasil dibuat!\n")
-
-        elif action == "edit_msg":
-            g_names = list(groups.keys())
-            if not g_names:
-                continue
-            target_g = questionary.select("Select group to edit message:" if CURRENT_LANG == "en" else "Pilih grup yang ingin diubah pesannya:", choices=g_names).ask()
-            if target_g:
-                cur_msg = groups[target_g].get("message", "🔥")
-                new_msg = questionary.text(f"New message for '{target_g}':" if CURRENT_LANG == "en" else f"Pesan baru untuk '{target_g}':", default=cur_msg).ask()
-                if new_msg:
-                    groups[target_g]["message"] = new_msg
-                    save_config(cfg)
-                    print(f"[✓] Message updated!\n" if CURRENT_LANG == "en" else f"[✓] Pesan untuk '{target_g}' berhasil diperbarui!\n")
-
-        elif action == "delete":
-            g_names = list(groups.keys())
-            if not g_names:
-                continue
-            target_g = questionary.select("Select group to delete:" if CURRENT_LANG == "en" else "Pilih grup yang ingin dihapus:", choices=g_names + ["🔙 Cancel"]).ask()
-            if target_g and target_g != "🔙 Cancel":
-                del groups[target_g]
-                save_config(cfg)
-                print(f"[✓] Group '{target_g}' deleted.\n" if CURRENT_LANG == "en" else f"[✓] Grup '{target_g}' telah dihapus.\n")
-
-def menu_manage_exclude():
-    while True:
-        cfg = load_config()
-        excludes = cfg.get("select_all", {}).get("exclude", [])
-
-        print("\n" + "-" * 55)
-        print(t("exclude_title"))
-        print("-" * 55)
-        for idx, ex in enumerate(excludes, 1):
-            print(f" {idx:2d}. {ex}")
-        print("-" * 55 + "\n")
-
-        choices = [
-            Choice(t("exclude_opt_add"), value="add"),
-            Choice(t("exclude_opt_remove"), value="remove"),
-            Separator(),
-            Choice(t("exclude_opt_back"), value="back")
-        ]
-
-        action = questionary.select("Manage Blacklist:" if CURRENT_LANG == "en" else "Kelola Blacklist:", choices=choices).ask()
-        if action in ("back", None):
-            break
-
-        if action == "add":
-            new_acc = questionary.text("Account name to blacklist:" if CURRENT_LANG == "en" else "Nama akun yang ingin dilewati/blacklist:").ask()
-            if new_acc and new_acc.strip():
-                excludes.append(new_acc.strip())
-                save_config(cfg)
-                print(f"[✓] '{new_acc.strip()}' added to blacklist.\n" if CURRENT_LANG == "en" else f"[✓] '{new_acc.strip()}' ditambahkan ke blacklist.\n")
-
-        elif action == "remove":
-            if not excludes:
-                continue
-            to_remove = questionary.checkbox(
-                "Select accounts to remove from blacklist:" if CURRENT_LANG == "en" else "Pilih akun yang ingin dihapus dari blacklist:",
-                choices=[Choice(title=e, value=e) for e in excludes]
-            ).ask()
-            if to_remove:
-                cfg["select_all"]["exclude"] = [e for e in excludes if e not in to_remove]
-                save_config(cfg)
-                print(f"[✓] {len(to_remove)} account(s) removed from blacklist.\n" if CURRENT_LANG == "en" else f"[✓] {len(to_remove)} akun berhasil dihapus dari blacklist.\n")
-
 def menu_manage_recipients():
     while True:
         cfg = load_config()
-        mode = cfg.get("mode", "all")
-        mode_label = ("Select All (All Contacts)" if mode == "all" else "Groups / Labeling") if CURRENT_LANG == "en" else ("Select All (Semua Kontak)" if mode == "all" else "Groups / Labeling")
+        contacts = cfg.get("contacts", [])
+        active_recipients = get_active_recipients(cfg)
 
         choices = [
-            Choice(t("recip_toggle_mode", mode=mode_label), value="toggle_mode"),
-            Choice(t("recip_checklist"), value="checklist"),
-            Choice(t("recip_groups"), value="groups"),
-            Choice(t("recip_messages"), value="messages"),
-            Choice(t("recip_exclude"), value="exclude"),
-            Choice(t("recip_preview"), value="preview"),
+            Choice(
+                f"☑️  Select Recipients ({len(active_recipients)} of {len(contacts)} active)" if CURRENT_LANG == "en" else f"☑️  Pilih Penerima ({len(active_recipients)} dari {len(contacts)} aktif)",
+                value="checklist"
+            ),
+            Choice("💬 Edit Default Streak Message" if CURRENT_LANG == "en" else "💬 Ubah Pesan Default Streak", value="message"),
+            Choice("👁️  Preview Recipient List" if CURRENT_LANG == "en" else "👁️  Lihat Daftar Penerima", value="preview"),
             Separator(),
             Choice(t("recip_back"), value="back")
         ]
 
         action = questionary.select(
-            t("recip_menu_title", mode=mode.upper()),
+            "Manage Streak Recipients:" if CURRENT_LANG == "en" else "Kelola Penerima Streak:",
             choices=choices
         ).ask()
 
         if action in ("back", None):
             break
-        elif action == "toggle_mode":
-            cfg["mode"] = "groups" if mode == "all" else "all"
-            save_config(cfg)
-            log_activity("CONFIG", f"Recipient mode changed to: {cfg['mode'].upper()}")
-            print(t("recip_mode_changed", mode=cfg['mode'].upper()))
         elif action == "checklist":
-            interactive_manage_contacts()
-        elif action == "groups":
-            menu_manage_groups()
-        elif action == "messages":
-            menu_manage_messages()
-        elif action == "exclude":
-            menu_manage_exclude()
+            if not contacts:
+                print("\n[!] No contacts saved. Please scan contacts in Account menu first.\n" if CURRENT_LANG == "en" else "\n[!] Belum ada kontak yang tersimpan. Silakan pilih 'Pindai Kontak' di Menu Akun terlebih dahulu.\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
+                continue
+
+            choices_c = [
+                Choice(title=c, value=c, checked=(c in active_recipients))
+                for c in contacts
+            ]
+
+            print("\n💡 Controls: [Space] Toggle, [a] Select All / Invert, [Enter] Save\n" if CURRENT_LANG == "en" else "\n💡 Navigasi: [Spasi] Pilih, [a] Pilih Semua, [Enter] Simpan\n")
+
+            selected = questionary.checkbox(
+                "Select contacts who will receive streaks:" if CURRENT_LANG == "en" else "Pilih kontak yang akan menerima streak:",
+                choices=choices_c,
+                instruction="(Space: toggle, a: all, Enter: save)" if CURRENT_LANG == "en" else "(Spasi: pilih, a: semua, Enter: simpan)"
+            ).ask()
+
+            if selected is not None:
+                cfg["recipients"] = list(selected)
+                save_config(cfg)
+                print(f"\n[✓] Saved! {len(selected)} of {len(contacts)} contacts selected to receive streaks.\n" if CURRENT_LANG == "en" else f"\n[✓] Tersimpan! {len(selected)} dari {len(contacts)} kontak dipilih menerima streak.\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+        elif action == "message":
+            curr_def = cfg.get("default_message", "🔥")
+            new_def = questionary.text("Default Streak Message:" if CURRENT_LANG == "en" else "Pesan Default Streak:", default=curr_def).ask()
+            if new_def:
+                cfg["default_message"] = new_def
+                save_config(cfg)
+                print("\n[✓] Saved!\n")
+
         elif action == "preview":
-            show_message_preview()
+            print("\n" + "=" * 55)
+            print("📋 ACTIVE RECIPIENTS (Will receive streak 🔥):" if CURRENT_LANG == "en" else "📋 PENERIMA AKTIF (Menerima streak 🔥):")
+            print("=" * 55)
+            for idx, c in enumerate(contacts, 1):
+                status = "✅ YES" if c in active_recipients else "❌ SKIP"
+                print(f" {idx:2d}. {c:<30} [{status}]")
+            print("=" * 55 + "\n")
+            questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
 def menu_manage_scheduler():
     while True:

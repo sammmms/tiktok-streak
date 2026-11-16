@@ -1,10 +1,11 @@
 {
   "app": "tiktok-streak",
   "name": "TikTok Streak Auto-Saver & Helper Hub",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "release_date": "2026-11-16",
   "changelog": [
-    "🐛 Fix missing 're' module import for emoji and nickname regex normalization",
+    "👥 Simplified Manage Recipients: direct multi-select checklist from detected contacts without complex groups",
+    "🐛 Fixed missing 're' module import for emoji and nickname regex normalization",
     "🛡️ Disable repetitive cron retry loops and suppress cron runs when session expired"
   ],
   "download_url": "https://raw.githubusercontent.com/sammmms/tiktok-streak/main/tiktok-streak.py"

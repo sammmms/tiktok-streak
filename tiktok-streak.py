@@ -690,13 +690,16 @@ def load_state() -> dict:
         "last_summary": "Never run"
     }
 
-def save_state(success: bool, sent_count: int, failed_count: int, summary: str, session_expired: bool = None):
+def save_state(success: bool, sent_count: int, failed_count: int, summary: str, session_expired: bool = None, sent_recipients: list = None):
     state = load_state()
     today_str = str(date.today())
     state["last_attempt"] = datetime.now().isoformat()
     state["sent_count"] = sent_count
     state["failed_count"] = failed_count
     state["last_summary"] = summary
+    if sent_recipients is not None:
+        state["sent_date"] = today_str
+        state["sent_recipients"] = list(sent_recipients)
     if success:
         state["last_success_date"] = today_str
         state["session_expired"] = False
@@ -1264,19 +1267,26 @@ def scan_dm_contacts(verbose: bool = True) -> list:
                         if name not in usernames:
                             try:
                                 it.click()
-                                time.sleep(0.3)
-                                uname = page.evaluate("""() => {
-                                    const u = document.querySelector('[data-e2e="chat-uniqueid"]');
-                                    if (u && u.innerText) return u.innerText.replace(/^@/, "").trim();
-                                    const a = document.querySelector('a[href*="/@"][data-discover]');
-                                    if (a) {
-                                        const m = a.getAttribute("href").match(/\\/@([a-zA-Z0-9_.-]+)/);
-                                        if (m) return m[1];
-                                    }
-                                    return null;
-                                }""")
-                                if uname:
-                                    usernames[name] = uname
+                                header_nick = page.locator('[data-e2e="dm-new-chat-nickname"]')
+                                matched_header = False
+                                for _ in range(6):
+                                    time.sleep(0.4)
+                                    if header_nick.count() > 0 and match_target_names(header_nick.first.inner_text().strip(), name):
+                                        matched_header = True
+                                        break
+                                if matched_header:
+                                    uname = page.evaluate("""() => {
+                                        const u = document.querySelector('[data-e2e="chat-uniqueid"]');
+                                        if (u && u.innerText) return u.innerText.replace(/^@/, "").trim();
+                                        const a = document.querySelector('a[href*="/@"][data-discover]');
+                                        if (a) {
+                                            const m = a.getAttribute("href").match(/\\/@([a-zA-Z0-9_.-]+)/);
+                                            if (m) return m[1];
+                                        }
+                                        return null;
+                                    }""")
+                                    if uname:
+                                        usernames[name] = uname
                             except Exception:
                                 pass
 
@@ -1385,6 +1395,7 @@ def reset_conversation_list_scroll(page):
 def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) -> bool:
     cfg = load_config()
     expected_uname = cfg.get("usernames", {}).get(target_name, "").lower().lstrip("@")
+    known_contacts = cfg.get("contacts", [])
 
     for phase in range(2):
         for scroll_idx in range(max_scroll_attempts):
@@ -1399,8 +1410,13 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
 
                 current_nick = nick_el.inner_text().strip()
                 matches = match_target_names(current_nick, target_name)
+                # Only fallback to username match if current_nick is NOT another known contact in the list
                 if not matches and expected_uname:
-                    matches = (cfg.get("usernames", {}).get(current_nick, "").lower().lstrip("@") == expected_uname)
+                    if current_nick not in known_contacts:
+                        if current_nick.lower().lstrip("@") == expected_uname:
+                            matches = True
+                        elif cfg.get("usernames", {}).get(current_nick, "").lower().lstrip("@") == expected_uname:
+                            matches = True
 
                 if matches:
                     nick_el.scroll_into_view_if_needed()
@@ -1412,29 +1428,27 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
                     chat_uniqueid = page.locator('[data-e2e="chat-uniqueid"]')
                     for _ in range(7):
                         time.sleep(0.5)
-                        if expected_uname and chat_uniqueid.count() > 0:
-                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
-                            if uid == expected_uname:
-                                return True
                         if chat_header_nick.count() > 0:
                             header_text = chat_header_nick.first.inner_text().strip()
                             if match_target_names(header_text, target_name):
+                                return True
+                        if expected_uname and chat_uniqueid.count() > 0:
+                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                            if uid == expected_uname:
                                 return True
 
                     # Fallback click on parent item
                     item.click()
                     for _ in range(5):
                         time.sleep(0.4)
-                        if expected_uname and chat_uniqueid.count() > 0:
-                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
-                            if uid == expected_uname:
-                                return True
                         if chat_header_nick.count() > 0:
                             header_text = chat_header_nick.first.inner_text().strip()
                             if match_target_names(header_text, target_name):
                                 return True
-                        if item.get_attribute("aria-selected") == "true":
-                            return True
+                        if expected_uname and chat_uniqueid.count() > 0:
+                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                            if uid == expected_uname:
+                                return True
 
             page.mouse.wheel(0, 400)
             time.sleep(0.4)
@@ -1466,6 +1480,10 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
         if verbose:
             print(f"[*] {msg}")
         return {"success": True, "message": msg, "sent": state.get("sent_count", 0)}
+
+    sent_today = set()
+    if not force and state.get("sent_date") == today_str:
+        sent_today = set(state.get("sent_recipients", []))
 
     cfg = load_config()
     default_msg = cfg.get("default_message", "🔥")
@@ -1504,10 +1522,27 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                 err = "No recipients selected. Please configure recipients in Manage Recipients menu." if CURRENT_LANG == "en" else "Tidak ada penerima yang dipilih. Silakan atur di menu Kelola Penerima."
                 raise Exception(err)
 
+            pending_recipients = [r for r in target_recipients if force or r not in sent_today]
+            if not pending_recipients and not force:
+                msg = t("streak_already_sent_log", date=today_str)
+                if verbose:
+                    print(f"[*] {msg}")
+                save_state(True, len(target_recipients), 0, f"Sent: {len(target_recipients)}, Failed: 0", sent_recipients=list(sent_today))
+                context.close()
+                return {"success": True, "message": msg, "sent": len(target_recipients)}
+
             if verbose:
-                print(f"[*] Dispatching streaks to {len(target_recipients)} active recipients...")
+                if sent_today:
+                    print(f"[*] Dispatching streaks to {len(pending_recipients)} remaining recipients ({len(sent_today)} already sent today)...")
+                else:
+                    print(f"[*] Dispatching streaks to {len(target_recipients)} active recipients...")
 
             for target_name in target_recipients:
+                if not force and target_name in sent_today:
+                    if verbose:
+                        print(f"  [-] Skipping {target_name} (Streak already sent today)")
+                    continue
+
                 final_msg = resolve_message_for_contact(target_name, group_msg=default_msg)
                 if verbose:
                     print(t("streak_finding_contact", name=target_name, msg=final_msg))
@@ -1517,6 +1552,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                     time.sleep(get_click_delay())
                     if send_message_in_chat(page, final_msg, expected_target=target_name):
                         success_list.append(f"{target_name} ('{final_msg}')")
+                        sent_today.add(target_name)
                         log_activity("JOB", f"Streak sent to '{target_name}' -> '{final_msg}'")
                         if verbose:
                             print(f"      [✓] Sent ({final_msg})!")
@@ -1540,9 +1576,11 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
             fail_list.append(f"System Error: {err_text}")
             log_message(f"Error during streak run: {e}")
 
-    overall_success = len(success_list) > 0 and len(fail_list) == 0
-    summary = f"Sent: {len(success_list)}, Failed: {len(fail_list)}"
-    save_state(overall_success, len(success_list), len(fail_list), summary, session_expired=True if is_auth_error else None)
+    all_targets_sent = all(t in sent_today for t in target_recipients)
+    overall_success = all_targets_sent and len(fail_list) == 0
+    total_sent = len(sent_today)
+    summary = f"Sent: {total_sent}, Failed: {len(fail_list)}"
+    save_state(overall_success, total_sent, len(fail_list), summary, session_expired=True if is_auth_error else None, sent_recipients=list(sent_today))
 
     report = f"{t('streak_report_title')}\n"
     if success_list:
@@ -1550,17 +1588,18 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
     if fail_list:
         report += f"\n\n{t('streak_report_failed', count=len(fail_list))}\n- " + "\n- ".join(fail_list)
 
-    send_notification(
-        title="TikTok Streak Saver",
-        text=report,
-        success=overall_success
-    )
+    if success_list or fail_list:
+        send_notification(
+            title="TikTok Streak Saver",
+            text=report,
+            success=overall_success
+        )
 
     log_message(t("streak_finished", summary=summary))
     return {
         "success": overall_success,
         "message": summary,
-        "sent": len(success_list),
+        "sent": total_sent,
         "failed": len(fail_list),
         "is_auth_error": is_auth_error
     }

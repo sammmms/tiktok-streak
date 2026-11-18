@@ -619,6 +619,10 @@ DEFAULT_CONFIG = {
             "members": []
         }
     },
+    "current_account": "",
+    "accounts": {},
+    "streak_counts": {},
+    "last_streak_dates": {},
     "contacts": [],
     "headless": True,
     "schedule": {
@@ -690,21 +694,47 @@ def load_state() -> dict:
         "last_summary": "Never run"
     }
 
-def save_state(success: bool, sent_count: int, failed_count: int, summary: str, session_expired: bool = None, sent_recipients: list = None):
+def get_account_state(account: str = "") -> dict:
+    state = load_state()
+    if not account:
+        try:
+            cfg = load_config()
+            account = cfg.get("current_account", "")
+        except Exception:
+            account = ""
+    if account and "accounts" in state and account in state["accounts"]:
+        return state["accounts"][account]
+    return state
+
+def save_state(success: bool, sent_count: int, failed_count: int, summary: str, session_expired: bool = None, sent_recipients: list = None, account: str = ""):
     state = load_state()
     today_str = str(date.today())
-    state["last_attempt"] = datetime.now().isoformat()
-    state["sent_count"] = sent_count
-    state["failed_count"] = failed_count
-    state["last_summary"] = summary
+    if not account:
+        try:
+            cfg = load_config()
+            account = cfg.get("current_account", "")
+        except Exception:
+            account = ""
+
+    acc_state = {
+        "last_attempt": datetime.now().isoformat(),
+        "sent_count": sent_count,
+        "failed_count": failed_count,
+        "last_summary": summary,
+        "session_expired": session_expired if session_expired is not None else False
+    }
     if sent_recipients is not None:
-        state["sent_date"] = today_str
-        state["sent_recipients"] = list(sent_recipients)
+        acc_state["sent_date"] = today_str
+        acc_state["sent_recipients"] = list(sent_recipients)
     if success:
-        state["last_success_date"] = today_str
-        state["session_expired"] = False
-    elif session_expired is not None:
-        state["session_expired"] = session_expired
+        acc_state["last_success_date"] = today_str
+        acc_state["session_expired"] = False
+
+    if account:
+        state.setdefault("accounts", {})[account] = acc_state
+        state["current_account"] = account
+
+    state.update(acc_state)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
@@ -1129,6 +1159,124 @@ def check_login_status() -> bool:
         storage_state = list(PROFILE_DIR.glob("**/*Cookies*")) + list(PROFILE_DIR.glob("**/*storage*"))
         return len(storage_state) > 0
 
+def get_logged_in_username(page) -> str:
+    """Detects the currently logged in username from the TikTok web page DOM/Context."""
+    try:
+        uname = page.evaluate("""() => {
+            const nav = document.querySelector('a[data-e2e="nav-profile"]');
+            if (nav) {
+                const href = nav.getAttribute("href") || "";
+                const m = href.match(/\\/@([a-zA-Z0-9_.-]+)/);
+                if (m) return m[1];
+            }
+            const profileLinks = document.querySelectorAll('header a[href*="/@"], div[class*="header"] a[href*="/@"]');
+            for (let a of profileLinks) {
+                const href = a.getAttribute("href") || "";
+                const m = href.match(/\\/@([a-zA-Z0-9_.-]+)/);
+                if (m) return m[1];
+            }
+            try {
+                if (window.__UNIVERSAL_DATA_FOR_REHYDRATION__) {
+                    const u = window.__UNIVERSAL_DATA_FOR_REHYDRATION__["__DEFAULT_SCOPE__"]["webapp.app-context"]?.user?.uniqueId;
+                    if (u) return u;
+                }
+            } catch(e) {}
+            return null;
+        }""")
+        return (uname or "").strip()
+    except Exception:
+        return ""
+
+def sync_active_account(cfg: dict, detected_user: str) -> bool:
+    """
+    Syncs the active account configuration.
+    If the detected account is different from cfg['current_account'],
+    it archives the previous account state and switches to the detected account.
+    Returns True if an account switch occurred.
+    """
+    if not detected_user:
+        return False
+    detected_user = detected_user.strip()
+    accounts = cfg.setdefault("accounts", {})
+    curr = cfg.get("current_account", "").strip()
+
+    if curr == detected_user:
+        accounts[detected_user] = {
+            "contacts": list(cfg.get("contacts", [])),
+            "recipients": list(cfg.get("recipients", [])),
+            "usernames": dict(cfg.get("usernames", {})),
+            "groups": dict(cfg.get("groups", {})),
+            "streak_counts": dict(cfg.get("streak_counts", {})),
+            "last_streak_dates": dict(cfg.get("last_streak_dates", {}))
+        }
+        save_config(cfg)
+        return False
+
+    if curr:
+        accounts[curr] = {
+            "contacts": list(cfg.get("contacts", [])),
+            "recipients": list(cfg.get("recipients", [])),
+            "usernames": dict(cfg.get("usernames", {})),
+            "groups": dict(cfg.get("groups", {})),
+            "streak_counts": dict(cfg.get("streak_counts", {})),
+            "last_streak_dates": dict(cfg.get("last_streak_dates", {}))
+        }
+    elif not accounts and cfg.get("contacts"):
+        accounts[detected_user] = {
+            "contacts": list(cfg.get("contacts", [])),
+            "recipients": list(cfg.get("recipients", [])),
+            "usernames": dict(cfg.get("usernames", {})),
+            "groups": dict(cfg.get("groups", {})),
+            "streak_counts": dict(cfg.get("streak_counts", {})),
+            "last_streak_dates": dict(cfg.get("last_streak_dates", {}))
+        }
+        cfg["current_account"] = detected_user
+        save_config(cfg)
+        return False
+
+    cfg["current_account"] = detected_user
+    if detected_user in accounts:
+        acc_data = accounts[detected_user]
+        cfg["contacts"] = list(acc_data.get("contacts", []))
+        cfg["recipients"] = list(acc_data.get("recipients", []))
+        cfg["usernames"] = dict(acc_data.get("usernames", {}))
+        cfg["groups"] = dict(acc_data.get("groups", copy.deepcopy(DEFAULT_CONFIG["groups"])))
+        cfg["streak_counts"] = dict(acc_data.get("streak_counts", {}))
+        cfg["last_streak_dates"] = dict(acc_data.get("last_streak_dates", {}))
+    else:
+        cfg["contacts"] = []
+        cfg["recipients"] = []
+        cfg["usernames"] = {}
+        cfg["groups"] = copy.deepcopy(DEFAULT_CONFIG["groups"])
+        cfg["streak_counts"] = {}
+        cfg["last_streak_dates"] = {}
+        accounts[detected_user] = {
+            "contacts": [],
+            "recipients": [],
+            "usernames": {},
+            "groups": copy.deepcopy(DEFAULT_CONFIG["groups"]),
+            "streak_counts": {},
+            "last_streak_dates": {}
+        }
+    save_config(cfg)
+    return True
+
+def logout_session() -> bool:
+    """Clears browser cookies and session to allow logging in with another TikTok account."""
+    import shutil
+    try:
+        if PROFILE_DIR.exists():
+            shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        st = load_state()
+        st["session_expired"] = True
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(st, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"[!] Error clearing session: {e}")
+        return False
+
 def launch_browser_context(p, headless: bool = True):
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     opts = {
@@ -1182,12 +1330,19 @@ def interactive_login():
         print(t("login_playwright_missing"))
         return
 
+    detected_user = ""
     with sync_playwright() as p:
         context = launch_browser_context(p, headless=False)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("https://www.tiktok.com/login", wait_until="networkidle")
 
         input(t("login_wait_confirm"))
+        try:
+            page.goto("https://www.tiktok.com/messages", wait_until="networkidle", timeout=20000)
+            time.sleep(2)
+            detected_user = get_logged_in_username(page)
+        except Exception:
+            pass
         context.close()
 
     st = load_state()
@@ -1196,6 +1351,19 @@ def interactive_login():
         json.dump(st, f, indent=2, ensure_ascii=False)
 
     print(t("login_saved"))
+    if detected_user:
+        cfg = load_config()
+        switched = sync_active_account(cfg, detected_user)
+        print(f"👤 Logged in as: @{detected_user}" if CURRENT_LANG == "en" else f"👤 Login sebagai: @{detected_user}")
+        if switched:
+            print(f"🔄 Switched account profile to: @{detected_user}" if CURRENT_LANG == "en" else f"🔄 Profil akun beralih ke: @{detected_user}")
+        if not cfg.get("contacts"):
+            do_scan = questionary.confirm(
+                "No contacts saved for this account. Scan DM contacts now?" if CURRENT_LANG == "en" else "Belum ada kontak tersimpan untuk akun ini. Pindai kontak DM sekarang?",
+                default=True
+            ).ask()
+            if do_scan:
+                scan_dm_contacts(verbose=True)
 
 def scan_dm_contacts(verbose: bool = True) -> list:
     if verbose:
@@ -1210,6 +1378,8 @@ def scan_dm_contacts(verbose: bool = True) -> list:
     cfg = load_config()
     detected_contacts = []
     usernames = cfg.setdefault("usernames", {})
+    streak_counts = cfg.setdefault("streak_counts", {})
+    detected_user = ""
 
     with sync_playwright() as p:
         try:
@@ -1223,6 +1393,14 @@ def scan_dm_contacts(verbose: bool = True) -> list:
                     print(t("scan_expired"))
                 context.close()
                 return []
+
+            detected_user = get_logged_in_username(page)
+            if detected_user:
+                switched = sync_active_account(cfg, detected_user)
+                if switched and verbose:
+                    print(f"[*] Account detected: @{detected_user}")
+                usernames = cfg.setdefault("usernames", {})
+                streak_counts = cfg.setdefault("streak_counts", {})
 
             # Harvest any profile links already rendered on the page
             try:
@@ -1301,15 +1479,26 @@ def scan_dm_contacts(verbose: bool = True) -> list:
     if detected_contacts:
         cfg["contacts"] = detected_contacts
         cfg["usernames"] = usernames
-        save_config(cfg)
+        for c in detected_contacts:
+            if c not in streak_counts:
+                streak_counts[c] = 1
+        cfg["streak_counts"] = streak_counts
+        if not cfg.get("recipients"):
+            cfg["recipients"] = list(detected_contacts)
+        if detected_user:
+            sync_active_account(cfg, detected_user)
+        else:
+            save_config(cfg)
+
         if verbose:
             print(t("scan_found", count=len(detected_contacts)))
-            print("-" * 50)
+            print("-" * 55)
             for idx, name in enumerate(detected_contacts, 1):
                 u = usernames.get(name)
+                strk = streak_counts.get(name, 1)
                 label = f"{name} (@{u})" if u and u.lower() != name.lower() else (f"@{u}" if u else name)
-                print(f" {idx:2d}. {label}")
-            print("-" * 50)
+                print(f" {idx:2d}. {label:<38} [🔥 {strk}]")
+            print("-" * 55)
     else:
         if verbose:
             print(t("scan_none"))
@@ -1472,20 +1661,21 @@ def get_active_recipients(cfg) -> list:
     return [c for c in contacts if c.lower() not in excludes]
 
 def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
-    state = load_state()
+    cfg = load_config()
+    current_acc = cfg.get("current_account", "")
+    acc_state = get_account_state(current_acc)
     today_str = str(date.today())
 
-    if not force and state.get("last_success_date") == today_str:
+    if not force and acc_state.get("last_success_date") == today_str:
         msg = t("streak_already_sent_log", date=today_str)
         if verbose:
             print(f"[*] {msg}")
-        return {"success": True, "message": msg, "sent": state.get("sent_count", 0)}
+        return {"success": True, "message": msg, "sent": acc_state.get("sent_count", 0)}
 
     sent_today = set()
-    if not force and state.get("sent_date") == today_str:
-        sent_today = set(state.get("sent_recipients", []))
+    if not force and acc_state.get("sent_date") == today_str:
+        sent_today = set(acc_state.get("sent_recipients", []))
 
-    cfg = load_config()
     default_msg = cfg.get("default_message", "🔥")
 
     log_message(t("streak_starting"))
@@ -1517,6 +1707,22 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                 is_auth_error = True
                 raise Exception("Session expired. Please log in again via Account menu.")
 
+            detected_user = get_logged_in_username(page)
+            if detected_user:
+                switched = sync_active_account(cfg, detected_user)
+                if switched or detected_user != current_acc:
+                    current_acc = detected_user
+                    acc_state = get_account_state(current_acc)
+                    if not force and acc_state.get("last_success_date") == today_str:
+                        msg = t("streak_already_sent_log", date=today_str)
+                        if verbose:
+                            print(f"[*] {msg}")
+                        context.close()
+                        return {"success": True, "message": msg, "sent": acc_state.get("sent_count", 0)}
+                    sent_today = set(acc_state.get("sent_recipients", [])) if (not force and acc_state.get("sent_date") == today_str) else set()
+                if verbose:
+                    print(f"[*] Active account: @{current_acc}")
+
             target_recipients = get_active_recipients(cfg)
             if not target_recipients:
                 err = "No recipients selected. Please configure recipients in Manage Recipients menu." if CURRENT_LANG == "en" else "Tidak ada penerima yang dipilih. Silakan atur di menu Kelola Penerima."
@@ -1527,7 +1733,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                 msg = t("streak_already_sent_log", date=today_str)
                 if verbose:
                     print(f"[*] {msg}")
-                save_state(True, len(target_recipients), 0, f"Sent: {len(target_recipients)}, Failed: 0", sent_recipients=list(sent_today))
+                save_state(True, len(target_recipients), 0, f"Sent: {len(target_recipients)}, Failed: 0", sent_recipients=list(sent_today), account=current_acc)
                 context.close()
                 return {"success": True, "message": msg, "sent": len(target_recipients)}
 
@@ -1551,11 +1757,29 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
                 if found:
                     time.sleep(get_click_delay())
                     if send_message_in_chat(page, final_msg, expected_target=target_name):
-                        success_list.append(f"{target_name} ('{final_msg}')")
+                        streak_counts = cfg.setdefault("streak_counts", {})
+                        last_streak_dates = cfg.setdefault("last_streak_dates", {})
+                        if target_name not in streak_counts:
+                            current_n = 0
+                            new_n = 1
+                            streak_counts[target_name] = 1
+                            last_streak_dates[target_name] = today_str
+                        else:
+                            current_n = int(streak_counts[target_name])
+                            last_d = last_streak_dates.get(target_name)
+                            if last_d != today_str:
+                                new_n = current_n + 1
+                                streak_counts[target_name] = new_n
+                                last_streak_dates[target_name] = today_str
+                            else:
+                                new_n = current_n
+
+                        save_config(cfg)
                         sent_today.add(target_name)
-                        log_activity("JOB", f"Streak sent to '{target_name}' -> '{final_msg}'")
+                        success_list.append(f"{target_name} ('{final_msg}') [🔥 {new_n}]")
+                        log_activity("JOB", f"Streak sent to '{target_name}' -> '{final_msg}' [Streak 🔥 {current_n} ➔ {new_n}]")
                         if verbose:
-                            print(f"      [✓] Sent ({final_msg})!")
+                            print(f"      [✓] Sent ({final_msg})! [Streak 🔥 {current_n} ➔ {new_n}]")
                     else:
                         fail_list.append(target_name)
                         log_activity("ERROR", f"Failed to verify/send to '{target_name}'")
@@ -1580,9 +1804,11 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
     overall_success = all_targets_sent and len(fail_list) == 0
     total_sent = len(sent_today)
     summary = f"Sent: {total_sent}, Failed: {len(fail_list)}"
-    save_state(overall_success, total_sent, len(fail_list), summary, session_expired=True if is_auth_error else None, sent_recipients=list(sent_today))
+    save_state(overall_success, total_sent, len(fail_list), summary, session_expired=True if is_auth_error else None, sent_recipients=list(sent_today), account=current_acc)
 
     report = f"{t('streak_report_title')}\n"
+    if current_acc:
+        report += f"Account: @{current_acc}\n"
     if success_list:
         report += f"\n{t('streak_report_success', count=len(success_list))}\n- " + "\n- ".join(success_list)
     if fail_list:
@@ -1590,7 +1816,7 @@ def run_send_streak(force: bool = False, verbose: bool = True) -> dict:
 
     if success_list or fail_list:
         send_notification(
-            title="TikTok Streak Saver",
+            title=f"TikTok Streak Saver (@{current_acc})" if current_acc else "TikTok Streak Saver",
             text=report,
             success=overall_success
         )
@@ -1636,7 +1862,9 @@ def print_dashboard():
     print("\n" + "=" * 58)
     print(t("dash_title"))
     print("=" * 58)
-    print(f"{t('dash_account_status')}{t('dash_status_valid') if is_logged_in else t('dash_status_unauthed')}")
+    curr_user = cfg.get("current_account", "")
+    user_suffix = f" (@{curr_user})" if curr_user else ""
+    print(f"{t('dash_account_status')}{t('dash_status_valid') if is_logged_in else t('dash_status_unauthed')}{user_suffix}")
     if has_run_today:
         print(f"{t('dash_today_status')}{t('dash_today_sent', count=state.get('sent_count', 0))}")
     else:
@@ -1658,14 +1886,19 @@ def menu_manage_recipients():
         contacts = cfg.get("contacts", [])
         active_recipients = get_active_recipients(cfg)
         usernames = cfg.get("usernames", {})
+        streak_counts = cfg.setdefault("streak_counts", {})
+        last_streak_dates = cfg.setdefault("last_streak_dates", {})
+        today_str = str(date.today())
 
         def format_recipient_label(name):
             u = usernames.get(name)
+            strk = streak_counts.get(name, 1)
+            streak_badge = f"🔥 {strk}"
             if u and u.lower() != name.lower():
-                return f"{name} (@{u})"
+                return f"{name} (@{u}) [{streak_badge}]"
             elif u:
-                return f"@{u}"
-            return name
+                return f"@{u} [{streak_badge}]"
+            return f"{name} [{streak_badge}]"
 
         choices = [
             Choice(
@@ -1675,7 +1908,8 @@ def menu_manage_recipients():
             Choice("⚡ Set Dispatch Speed (Pace)" if CURRENT_LANG == "en" else "⚡ Atur Kecepatan Pengiriman Pesan", value="speed"),
             Choice("✏️  Edit / Set Contact Username" if CURRENT_LANG == "en" else "✏️  Atur / Ubah Username Kontak", value="edit_username"),
             Choice("💬 Edit Default Streak Message" if CURRENT_LANG == "en" else "💬 Ubah Pesan Default Streak", value="message"),
-            Choice("👁️  Preview Recipient List" if CURRENT_LANG == "en" else "👁️  Lihat Daftar Penerima", value="preview"),
+            Choice("👁️  Preview Recipient List & Streaks (🔥)" if CURRENT_LANG == "en" else "👁️  Lihat Daftar Penerima & Jumlah Api (🔥)", value="preview"),
+            Choice("🔥 Manage / Calibrate Streak Counts (Api)" if CURRENT_LANG == "en" else "🔥 Atur / Kalibrasi Jumlah Api (Streak 🔥)", value="manage_streaks"),
             Separator(),
             Choice(t("recip_back"), value="back")
         ]
@@ -1689,6 +1923,8 @@ def menu_manage_recipients():
             break
         elif action == "speed":
             menu_safety_settings()
+        elif action == "manage_streaks":
+            menu_manage_streak_counts()
         elif action == "checklist":
             if not contacts:
                 print("\n[!] No contacts saved. Please scan contacts in Account menu first.\n" if CURRENT_LANG == "en" else "\n[!] Belum ada kontak yang tersimpan. Silakan pilih 'Pindai Kontak' di Menu Akun terlebih dahulu.\n")
@@ -1710,7 +1946,11 @@ def menu_manage_recipients():
 
             if selected is not None:
                 cfg["recipients"] = list(selected)
-                save_config(cfg)
+                curr_acc = cfg.get("current_account", "")
+                if curr_acc:
+                    sync_active_account(cfg, curr_acc)
+                else:
+                    save_config(cfg)
                 print(f"\n[✓] Saved! {len(selected)} of {len(contacts)} contacts selected to receive streaks.\n" if CURRENT_LANG == "en" else f"\n[✓] Tersimpan! {len(selected)} dari {len(contacts)} kontak dipilih menerima streak.\n")
                 questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
@@ -1739,7 +1979,11 @@ def menu_manage_recipients():
                         cfg.setdefault("usernames", {})[chosen] = new_u
                     elif chosen in cfg.get("usernames", {}):
                         del cfg["usernames"][chosen]
-                    save_config(cfg)
+                    curr_acc = cfg.get("current_account", "")
+                    if curr_acc:
+                        sync_active_account(cfg, curr_acc)
+                    else:
+                        save_config(cfg)
                     print("\n[✓] Username updated!\n" if CURRENT_LANG == "en" else "\n[✓] Username berhasil diperbarui!\n")
                     questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
@@ -1752,15 +1996,146 @@ def menu_manage_recipients():
                 print("\n[✓] Saved!\n")
 
         elif action == "preview":
-            print("\n" + "=" * 58)
-            print("📋 ACTIVE RECIPIENTS (Will receive streak 🔥):" if CURRENT_LANG == "en" else "📋 PENERIMA AKTIF (Menerima streak 🔥):")
-            print("=" * 58)
+            print("\n" + "=" * 76)
+            print("📋 ACTIVE RECIPIENTS & STREAK COUNT (🔥):" if CURRENT_LANG == "en" else "📋 DAFTAR PENERIMA & JUMLAH API (STREAK 🔥):")
+            print("=" * 76)
+            print(f" {'No':<3} {'Nama Kontak':<26} {'Username':<18} {'Api/Streak':<12} {'Status':<15}")
+            print("-" * 76)
             for idx, c in enumerate(contacts, 1):
                 status = "✅ YES" if c in active_recipients else "❌ SKIP"
-                disp = format_recipient_label(c)
-                print(f" {idx:2d}. {disp:<36} [{status}]")
-            print("=" * 58 + "\n")
+                u = usernames.get(c, "-")
+                u_str = f"@{u}" if u != "-" else "-"
+                strk = streak_counts.get(c, 1)
+                last_d = last_streak_dates.get(c, "-")
+                d_info = f"({last_d})" if last_d != "-" else "(Belum pernah)"
+                print(f" {idx:2d}. {c:<26} {u_str:<18} 🔥 {strk:<9} {status:<8} {d_info}")
+            print("=" * 76 + "\n")
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+def menu_manage_streak_counts():
+    while True:
+        cfg = load_config()
+        contacts = cfg.get("contacts", [])
+        usernames = cfg.get("usernames", {})
+        streak_counts = cfg.setdefault("streak_counts", {})
+        last_streak_dates = cfg.setdefault("last_streak_dates", {})
+        today_str = str(date.today())
+
+        if not contacts:
+            print("\n[!] No contacts saved. Please scan contacts first.\n" if CURRENT_LANG == "en" else "\n[!] Belum ada kontak tersimpan. Silakan pindai kontak terlebih dahulu.\n")
+            questionary.press_any_key_to_continue(t("press_key_return")).ask()
+            break
+
+        choices = [
+            Choice("📋 View Streak Counts Table" if CURRENT_LANG == "en" else "📋 Lihat Tabel Jumlah Api / Streak", value="table"),
+            Choice("✏️  Calibrate Contact Streak Count" if CURRENT_LANG == "en" else "✏️  Kalibrasi / Ubah Jumlah Api Kontak", value="edit_one"),
+            Choice("🔢 Set Default Streak Count for All Contacts" if CURRENT_LANG == "en" else "🔢 Setel Angka Api untuk Semua Kontak Sekaligus", value="set_all"),
+            Choice("🔄 Reset Streak Count for Contact" if CURRENT_LANG == "en" else "🔄 Reset / Nolkan Streak Kontak", value="reset_one"),
+            Separator(),
+            Choice(t("recip_back"), value="back")
+        ]
+
+        action = questionary.select(
+            "Manage / Calibrate Streak Counts (🔥):" if CURRENT_LANG == "en" else "Kelola / Kalibrasi Jumlah Api (Streak 🔥):",
+            choices=choices
+        ).ask()
+
+        if action in ("back", None):
+            break
+
+        elif action == "table":
+            print("\n" + "=" * 76)
+            print("🔥 PREVIEW JUMLAH API / STREAK KONTAK" if CURRENT_LANG != "en" else "🔥 CONTACT STREAK COUNTS PREVIEW")
+            print("=" * 76)
+            print(f" {'No':<3} {'Nama Kontak':<26} {'Username':<18} {'Api/Streak':<12} {'Status Hari Ini':<15}")
+            print("-" * 76)
+            for idx, c in enumerate(contacts, 1):
+                u = usernames.get(c, "-")
+                u_str = f"@{u}" if u != "-" else "-"
+                strk = streak_counts.get(c, 1)
+                last_d = last_streak_dates.get(c, "-")
+                status = "✅ Terkirim" if last_d == today_str else "⌛ Belum"
+                print(f" {idx:2d}. {c:<26} {u_str:<18} 🔥 {strk:<9} {status} ({last_d})")
+            print("=" * 76 + "\n")
+            questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+        elif action == "edit_one":
+            contact_choices = [
+                Choice(
+                    title=f"{c} (@{usernames.get(c, '-')}) [🔥 {streak_counts.get(c, 1)}]",
+                    value=c
+                )
+                for c in contacts
+            ] + [Separator(), Choice(t("recip_back"), value="back")]
+
+            chosen = questionary.select(
+                "Select contact to calibrate streak count:" if CURRENT_LANG == "en" else "Pilih kontak yang ingin dikalibrasi jumlah apinya:",
+                choices=contact_choices
+            ).ask()
+
+            if chosen and chosen != "back":
+                current_val = streak_counts.get(chosen, 1)
+                new_val_str = questionary.text(
+                    f"New streak count for '{chosen}' (e.g. from your TikTok app):" if CURRENT_LANG == "en" else f"Jumlah api baru untuk '{chosen}' (sesuai app TikTok):",
+                    default=str(current_val)
+                ).ask()
+                if new_val_str and new_val_str.isdigit():
+                    new_val = int(new_val_str)
+                    streak_counts[chosen] = new_val
+                    cfg["streak_counts"] = streak_counts
+                    curr_acc = cfg.get("current_account", "")
+                    if curr_acc:
+                        sync_active_account(cfg, curr_acc)
+                    else:
+                        save_config(cfg)
+                    print(f"\n[✓] Streak for '{chosen}' calibrated to: 🔥 {new_val}\n" if CURRENT_LANG == "en" else f"\n[✓] Jumlah api untuk '{chosen}' berhasil diubah ke: 🔥 {new_val}\n")
+                    questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+        elif action == "set_all":
+            val_str = questionary.text(
+                "Set streak count for ALL contacts (e.g. 1):" if CURRENT_LANG == "en" else "Masukkan angka streak untuk SEMUA kontak sekaligus (misal: 1):",
+                default="1"
+            ).ask()
+            if val_str and val_str.isdigit():
+                val = int(val_str)
+                for c in contacts:
+                    streak_counts[c] = val
+                cfg["streak_counts"] = streak_counts
+                curr_acc = cfg.get("current_account", "")
+                if curr_acc:
+                    sync_active_account(cfg, curr_acc)
+                else:
+                    save_config(cfg)
+                print(f"\n[✓] All {len(contacts)} contacts set to: 🔥 {val}\n" if CURRENT_LANG == "en" else f"\n[✓] Seluruh {len(contacts)} kontak berhasil diatur ke: 🔥 {val}\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
+
+        elif action == "reset_one":
+            contact_choices = [
+                Choice(
+                    title=f"{c} (@{usernames.get(c, '-')}) [🔥 {streak_counts.get(c, 1)}]",
+                    value=c
+                )
+                for c in contacts
+            ] + [Separator(), Choice(t("recip_back"), value="back")]
+
+            chosen = questionary.select(
+                "Select contact to reset streak count:" if CURRENT_LANG == "en" else "Pilih kontak untuk di-reset:",
+                choices=contact_choices
+            ).ask()
+
+            if chosen and chosen != "back":
+                streak_counts[chosen] = 0
+                if chosen in last_streak_dates:
+                    del last_streak_dates[chosen]
+                cfg["streak_counts"] = streak_counts
+                cfg["last_streak_dates"] = last_streak_dates
+                curr_acc = cfg.get("current_account", "")
+                if curr_acc:
+                    sync_active_account(cfg, curr_acc)
+                else:
+                    save_config(cfg)
+                print(f"\n[✓] Streak for '{chosen}' reset to: 0\n" if CURRENT_LANG == "en" else f"\n[✓] Streak untuk '{chosen}' di-reset ke: 0\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
 def menu_safety_settings():
     while True:
@@ -2304,14 +2679,20 @@ def menu_manage_messages():
 
 def menu_account():
     while True:
+        cfg = load_config()
+        curr_acc = cfg.get("current_account", "")
+        contacts = cfg.get("contacts", [])
         is_logged_in = check_login_status()
-        contacts = load_config().get("contacts", [])
         status_label = t("dash_status_valid") if is_logged_in else t("dash_status_unauthed")
+        acc_label = f"@{curr_acc}" if curr_acc else ("Not detected" if CURRENT_LANG == "en" else "Belum terdeteksi")
 
         choices = [
+            Choice(f"👤 {'Active Account:' if CURRENT_LANG == 'en' else 'Akun Aktif:'} {acc_label}", value="info"),
             Choice(t("account_opt_scan", count=len(contacts)), value="scan"),
             Choice(t("account_opt_login"), value="login"),
+            Choice("🔄 Detect / Switch Active Account" if CURRENT_LANG == "en" else "🔄 Deteksi / Ganti Akun Aktif", value="detect_account"),
             Choice(t("account_opt_check", status=status_label), value="check"),
+            Choice("🚪 Logout & Clear Browser Session" if CURRENT_LANG == "en" else "🚪 Logout & Bersihkan Sesi Browser", value="logout"),
             Separator(),
             Choice(t("account_opt_back"), value="back")
         ]
@@ -2319,16 +2700,66 @@ def menu_account():
         action = questionary.select(t("account_menu_title"), choices=choices).ask()
         if action in ("back", None):
             break
+        elif action == "info":
+            accounts = cfg.get("accounts", {})
+            print("\n" + "=" * 55)
+            print(f"👤 {'ACTIVE ACCOUNT INFORMATION' if CURRENT_LANG == 'en' else 'INFORMASI AKUN AKTIF'}")
+            print("=" * 55)
+            print(f" • Username   : @{curr_acc if curr_acc else 'None'}")
+            print(f" • Contacts   : {len(contacts)} contacts")
+            print(f" • Recipients : {len(get_active_recipients(cfg))} active")
+            print(f" • Session    : {status_label}")
+            if accounts:
+                print(f"\n📂 Saved Account Profiles ({len(accounts)}):")
+                for acc, data in accounts.items():
+                    mark = " (Active)" if acc == curr_acc else ""
+                    print(f"   - @{acc}: {len(data.get('contacts', []))} contacts{mark}")
+            print("=" * 55 + "\n")
+            questionary.press_any_key_to_continue(t("press_key_return")).ask()
         elif action == "scan":
             scan_dm_contacts(verbose=True)
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
         elif action == "login":
             interactive_login()
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
+        elif action == "detect_account":
+            print("\n[*] Detecting active TikTok account from browser profile...")
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    ctx = launch_browser_context(p, headless=True)
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    page.goto("https://www.tiktok.com/messages", wait_until="networkidle", timeout=30000)
+                    time.sleep(2)
+                    detected = get_logged_in_username(page)
+                    ctx.close()
+                if detected:
+                    switched = sync_active_account(cfg, detected)
+                    print(f"\n[✓] Detected active account: @{detected}")
+                    if switched:
+                        print(f"[✓] Switched active configuration to @{detected}!")
+                    else:
+                        print("[*] Already using active account profile.")
+                else:
+                    print("\n[!] Could not detect active account. Session might be expired.\n")
+            except Exception as e:
+                print(f"\n[x] Detection failed: {e}\n")
+            questionary.press_any_key_to_continue(t("press_key_return")).ask()
         elif action == "check":
             ok, _ = run_with_progress(t("checking_updates"), check_login_status, timeout=2.0)
             print(f"[{'✓' if ok else '!'}] Status: {t('dash_status_valid') if ok else t('dash_status_unauthed')}\n")
             questionary.press_any_key_to_continue(t("press_key_return")).ask()
+        elif action == "logout":
+            confirm = questionary.confirm(
+                "Are you sure you want to log out and clear browser cookies?" if CURRENT_LANG == "en" else "Apakah Anda yakin ingin logout dan membersihkan sesi browser?",
+                default=False
+            ).ask()
+            if confirm:
+                if logout_session():
+                    print("\n[✓] Browser session cleared. You can now log into a different account via 'Login TikTok'.\n" if CURRENT_LANG == "en" else "\n[✓] Sesi browser berhasil dibersihkan. Anda dapat login dengan akun lain melalui menu 'Login Akun TikTok'.\n")
+                else:
+                    print("\n[x] Failed to clear session.\n")
+                questionary.press_any_key_to_continue(t("press_key_return")).ask()
 
 def display_logs(date_filter: str = None, category_filter: str = None, max_lines: int = 40):
     clean_expired_logs(retention_days=3)
@@ -2487,8 +2918,35 @@ def interactive_hub():
         elif action == "language":
             menu_language()
 
+def print_streak_table(cfg: dict = None):
+    if cfg is None:
+        cfg = load_config()
+    contacts = cfg.get("contacts", [])
+    usernames = cfg.get("usernames", {})
+    streak_counts = cfg.get("streak_counts", {})
+    last_streak_dates = cfg.get("last_streak_dates", {})
+    today_str = str(date.today())
+    curr_acc = cfg.get("current_account", "")
+
+    print("\n" + "=" * 76)
+    title = f"🔥 TIKTOK STREAK COUNTER - @{curr_acc}" if curr_acc else "🔥 TIKTOK STREAK COUNTER"
+    print(title)
+    print("=" * 76)
+    print(f" {'No':<3} {'Nama Kontak':<26} {'Username':<18} {'Api/Streak':<12} {'Status Hari Ini':<15}")
+    print("-" * 76)
+    for idx, c in enumerate(contacts, 1):
+        u = usernames.get(c, "-")
+        u_str = f"@{u}" if u != "-" else "-"
+        strk = streak_counts.get(c, 1)
+        last_d = last_streak_dates.get(c, "-")
+        status = "✅ Terkirim" if last_d == today_str else "⌛ Belum"
+        print(f" {idx:2d}. {c:<26} {u_str:<18} 🔥 {strk:<9} {status} ({last_d})")
+    print("=" * 76 + "\n")
+
 def run_cron_job(max_retries: int = 1, retry_delay: int = 40):
-    state = load_state()
+    cfg = load_config()
+    current_acc = cfg.get("current_account", "")
+    state = get_account_state(current_acc)
     today_str = str(date.today())
     if state.get("last_success_date") == today_str:
         log_activity("SYSTEM", t("cron_already_sent", date=today_str))
@@ -2531,6 +2989,7 @@ def main():
     parser = argparse.ArgumentParser(description="⚡ TikTok Streak Auto-Saver & Helper Hub")
     parser.add_argument("--cron", action="store_true", help="Run unattended in background via scheduler")
     parser.add_argument("--force", action="store_true", help="Force send streak even if already sent today")
+    parser.add_argument("--streaks", action="store_true", help="Display contacts and streak counts table")
     parser.add_argument("--login", action="store_true", help="Open visual browser for login")
     parser.add_argument("--scan", action="store_true", help="Scan DM contacts from TikTok")
     parser.add_argument("--lang", "--language", choices=["en", "id"], help="Set UI language (en/id)")
@@ -2548,6 +3007,8 @@ def main():
     elif args.force:
         wait_for_internet(timeout=15, verbose=True)
         run_send_streak(force=True, verbose=True)
+    elif args.streaks:
+        print_streak_table(cfg)
     elif args.login:
         interactive_login()
     elif args.scan:

@@ -79,7 +79,7 @@ TRANSLATIONS = {
         "sched_linux_active": "Linux Crontab (Active)",
         "sched_not_configured": "Not Configured",
         "sched_unsupported": "Unsupported OS",
-        "sched_installed_mac": "[✓] Daily schedule registered at {time} with multi-interval wake-up catch-up via macOS LaunchAgent!",
+        "sched_installed_mac": "[✓] Daily schedule registered once per day at {time} via macOS LaunchAgent!",
         "sched_installed_win": "[✓] Windows Task Scheduler registered successfully at {time}.",
         "sched_installed_linux": "[✓] Linux Crontab registered successfully at {time}.",
         "sched_removed_mac": "[✓] macOS LaunchAgent removed.",
@@ -263,7 +263,7 @@ TRANSLATIONS = {
         "sched_linux_active": "Linux Crontab (Aktif)",
         "sched_not_configured": "Belum Dikonfigurasi",
         "sched_unsupported": "Sistem Operasi Tidak Didukung",
-        "sched_installed_mac": "[✓] Jadwal harian berhasil didaftarkan pukul {time} dengan multi-interval catch-up via macOS LaunchAgent!",
+        "sched_installed_mac": "[✓] Jadwal harian berhasil didaftarkan 1x sehari pukul {time} via macOS LaunchAgent!",
         "sched_installed_win": "[✓] Windows Task Scheduler berhasil didaftarkan pukul {time}.",
         "sched_installed_linux": "[✓] Linux Crontab berhasil didaftarkan pukul {time}.",
         "sched_removed_mac": "[✓] macOS LaunchAgent berhasil dihapus.",
@@ -1023,10 +1023,12 @@ def send_notification(title: str, text: str, success: bool):
 
 def get_scheduler_status() -> tuple:
     if OS_NAME == "Darwin":
-        plist_path = HOME_DIR / "Library/LaunchAgents/com.user.tiktok-streak.plist"
-        if plist_path.exists():
+        agents_dir = HOME_DIR / "Library/LaunchAgents"
+        plist_path = agents_dir / "com.user.tiktok-streak.plist"
+        old_plist = agents_dir / "com.user.tiktokstreak.plist"
+        if plist_path.exists() or old_plist.exists():
             out = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
-            if "tiktok-streak" in out:
+            if "tiktok" in out:
                 return True, t("sched_macos_active")
             return True, t("sched_macos_loaded")
         return False, t("sched_not_configured")
@@ -1052,16 +1054,12 @@ def install_scheduler():
         agents_dir = HOME_DIR / "Library/LaunchAgents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         plist_path = agents_dir / "com.user.tiktok-streak.plist"
+        old_plist_path = agents_dir / "com.user.tiktokstreak.plist"
 
-        intervals = []
-        for hour in range(h, 24):
-            intervals.append(f"""        <dict>
-            <key>Hour</key>
-            <integer>{hour}</integer>
-            <key>Minute</key>
-            <integer>{m}</integer>
-        </dict>""")
-        intervals_xml = "\n".join(intervals)
+        # Clean up legacy plist if present
+        if old_plist_path.exists():
+            subprocess.run(["launchctl", "unload", str(old_plist_path)], capture_output=True)
+            old_plist_path.unlink(missing_ok=True)
 
         content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1076,9 +1074,12 @@ def install_scheduler():
         <string>--cron</string>
     </array>
     <key>StartCalendarInterval</key>
-    <array>
-{intervals_xml}
-    </array>
+    <dict>
+        <key>Hour</key>
+        <integer>{h}</integer>
+        <key>Minute</key>
+        <integer>{m}</integer>
+    </dict>
     <key>StandardOutPath</key>
     <string>{LOG_FILE}</string>
     <key>StandardErrorPath</key>
@@ -1090,7 +1091,7 @@ def install_scheduler():
 
         subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
         subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
-        log_activity("CONFIG", f"macOS LaunchAgent registered at {time_str}")
+        log_activity("CONFIG", f"macOS LaunchAgent registered at {time_str} (once per day)")
         print(t("sched_installed_mac", time=time_str))
 
     elif OS_NAME == "Windows":
@@ -1114,11 +1115,12 @@ def install_scheduler():
 
 def remove_scheduler():
     if OS_NAME == "Darwin":
-        plist_path = HOME_DIR / "Library/LaunchAgents/com.user.tiktok-streak.plist"
-        if plist_path.exists():
-            subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
-            plist_path.unlink(missing_ok=True)
-            print(t("sched_removed_mac"))
+        agents_dir = HOME_DIR / "Library/LaunchAgents"
+        for p in [agents_dir / "com.user.tiktok-streak.plist", agents_dir / "com.user.tiktokstreak.plist"]:
+            if p.exists():
+                subprocess.run(["launchctl", "unload", str(p)], capture_output=True)
+                p.unlink(missing_ok=True)
+        print(t("sched_removed_mac"))
     elif OS_NAME == "Windows":
         subprocess.run(["schtasks", "/delete", "/tn", "TikTokStreakDaily", "/f"], capture_output=True)
         print(t("sched_removed_win"))
@@ -3004,6 +3006,12 @@ def run_cron_job(max_retries: int = 1, retry_delay: int = 40):
     today_str = str(date.today())
     if state.get("last_success_date") == today_str:
         log_activity("SYSTEM", t("cron_already_sent", date=today_str))
+        return
+
+    # Schedulers run once per day. If already attempted today, leave any remaining/failed for manual run.
+    last_attempt = state.get("last_attempt", "")
+    if state.get("sent_date") == today_str or (last_attempt and last_attempt.startswith(today_str)):
+        log_activity("SYSTEM", f"Cron check: Streak already attempted today ({today_str}). Remaining/failed contacts left for manual run.")
         return
 
     if state.get("session_expired"):

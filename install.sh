@@ -68,14 +68,20 @@ fi
 
 # 6. Setup macOS LaunchAgent (Catch-up saat laptop bangun/nyala)
 if [ "$(uname)" = "Darwin" ]; then
-    PLIST_PATH="$HOME/Library/LaunchAgents/com.user.tiktokstreak.plist"
+    PLIST_PATH="$HOME/Library/LaunchAgents/com.user.tiktok-streak.plist"
+    OLD_PLIST_PATH="$HOME/Library/LaunchAgents/com.user.tiktokstreak.plist"
+    
+    # Bersihkan plist lama jika ada
+    launchctl unload "$OLD_PLIST_PATH" 2>/dev/null || true
+    rm -f "$OLD_PLIST_PATH"
+
     cat <<EOF > "$PLIST_PATH"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.user.tiktokstreak</string>
+    <string>com.user.tiktok-streak</string>
     <key>ProgramArguments</key>
     <array>
         <string>$WRAPPER_FILE</string>
@@ -97,7 +103,7 @@ if [ "$(uname)" = "Darwin" ]; then
 EOF
     launchctl unload "$PLIST_PATH" 2>/dev/null || true
     launchctl load "$PLIST_PATH"
-    echo "⏰ Jadwal harian otomatis terdaftar jam 09:00 pagi (dengan macOS wake-up catch-up)!"
+    echo "⏰ Jadwal harian otomatis terdaftar 1x sehari jam 09:00 pagi via macOS LaunchAgent!"
 fi
 
 echo ""

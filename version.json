@@ -1,12 +1,13 @@
 {
   "app": "tiktok-streak",
   "name": "TikTok Streak Auto-Saver & Helper Hub",
-  "version": "1.4.4",
-  "release_date": "2026-11-16",
+  "version": "1.4.5",
+  "release_date": "2026-11-19",
   "changelog": [
-    "👥 Simplified Manage Recipients: direct multi-select checklist from detected contacts without complex groups",
-    "🐛 Fixed missing 're' module import for emoji and nickname regex normalization",
-    "🛡️ Disable repetitive cron retry loops and suppress cron runs when session expired"
+    "⏰ Fixed LaunchAgent scheduler to trigger strictly once per day (09:00) without 15-hour loop retries",
+    "🛡️ Added one-time daily cron guard: failed/remaining contacts are preserved for manual run instead of looping",
+    "🎯 Strict DM contact uniqueId and exact name verification to prevent matching collisions",
+    "👤 Multi-account support with isolated state and per-account streak tracking"
   ],
   "download_url": "https://raw.githubusercontent.com/sammmms/tiktok-streak/main/tiktok-streak.py"
 }

@@ -1522,7 +1522,7 @@ def match_target_names(name1: str, name2: str) -> bool:
         return True
     n1_clean = normalize_target_name(name1)
     n2_clean = normalize_target_name(name2)
-    if n1_clean and n2_clean and (n1_clean == n2_clean or n1_clean in n2_clean or n2_clean in n1_clean):
+    if n1_clean and n2_clean and n1_clean == n2_clean:
         return True
     return False
 
@@ -1535,22 +1535,45 @@ def send_message_in_chat(page, message: str, expected_target: str = None) -> boo
             header_uniqueid = page.locator('[data-e2e="chat-uniqueid"]')
             matched = False
             active_name = ""
+            active_uid = ""
             # Wait up to 5 seconds (10 x 0.5s) for the chat pane to switch to expected_target
             for _ in range(10):
-                if expected_uname and header_uniqueid.count() > 0:
+                uid = ""
+                if header_uniqueid.count() > 0:
                     uid = header_uniqueid.first.inner_text().strip().lower().lstrip("@")
-                    if uid == expected_uname:
-                        matched = True
-                        break
+                    active_uid = uid
+
+                name = ""
                 if header_nick.count() > 0:
-                    active_name = header_nick.first.inner_text().strip()
-                    if match_target_names(active_name, expected_target):
+                    name = header_nick.first.inner_text().strip()
+                    active_name = name
+
+                if expected_uname:
+                    if uid:
+                        if uid == expected_uname:
+                            matched = True
+                            break
+                        else:
+                            # Active chat uniqueId is different from expected_uname!
+                            time.sleep(0.5)
+                            continue
+                    elif name and match_target_names(name, expected_target):
                         matched = True
                         break
+                else:
+                    if name and match_target_names(name, expected_target):
+                        matched = True
+                        if uid:
+                            cfg.setdefault("usernames", {})[expected_target] = uid
+                            save_config(cfg)
+                        break
+
                 time.sleep(0.5)
 
-            if not matched and active_name:
-                log_message(t("streak_verif_fail", active=active_name.lower(), target=expected_target.lower()))
+            if not matched:
+                display_active = f"@{active_uid}" if active_uid else (active_name or "unknown")
+                display_target = f"@{expected_uname}" if expected_uname else expected_target
+                log_message(t("streak_verif_fail", active=display_active.lower(), target=display_target.lower()))
                 return False
 
         chatbox = page.locator('[data-e2e="dm-new-chatbox"]')
@@ -1617,28 +1640,59 @@ def select_and_open_chat(page, target_name: str, max_scroll_attempts: int = 15) 
                     chat_uniqueid = page.locator('[data-e2e="chat-uniqueid"]')
                     for _ in range(7):
                         time.sleep(0.5)
+                        uid = ""
+                        if chat_uniqueid.count() > 0:
+                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                        header_text = ""
                         if chat_header_nick.count() > 0:
                             header_text = chat_header_nick.first.inner_text().strip()
-                            if match_target_names(header_text, target_name):
+
+                        if expected_uname:
+                            if uid:
+                                if uid == expected_uname:
+                                    return True
+                            elif header_text and match_target_names(header_text, target_name):
                                 return True
-                        if expected_uname and chat_uniqueid.count() > 0:
-                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
-                            if uid == expected_uname:
+                        else:
+                            if header_text and match_target_names(header_text, target_name):
+                                if uid:
+                                    cfg.setdefault("usernames", {})[target_name] = uid
+                                    save_config(cfg)
                                 return True
 
                     # Fallback click on parent item
                     item.click()
                     for _ in range(5):
                         time.sleep(0.4)
+                        uid = ""
+                        if chat_uniqueid.count() > 0:
+                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
+                        header_text = ""
                         if chat_header_nick.count() > 0:
                             header_text = chat_header_nick.first.inner_text().strip()
-                            if match_target_names(header_text, target_name):
+
+                        if expected_uname:
+                            if uid:
+                                if uid == expected_uname:
+                                    return True
+                            elif header_text and match_target_names(header_text, target_name):
                                 return True
-                        if expected_uname and chat_uniqueid.count() > 0:
-                            uid = chat_uniqueid.first.inner_text().strip().lower().lstrip("@")
-                            if uid == expected_uname:
+                        else:
+                            if header_text and match_target_names(header_text, target_name):
+                                if uid:
+                                    cfg.setdefault("usernames", {})[target_name] = uid
+                                    save_config(cfg)
                                 return True
 
+            # Scroll conversation list container
+            try:
+                first_item = page.locator('[data-e2e="dm-new-conversation-item"]').first
+                if first_item.count() > 0:
+                    first_item.hover()
+                    parent = first_item.locator('xpath=../..')
+                    parent.evaluate('e => { e.scrollTop += 400; }')
+            except Exception:
+                pass
             page.mouse.wheel(0, 400)
             time.sleep(0.4)
 
